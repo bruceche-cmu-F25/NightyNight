@@ -1,0 +1,16 @@
+langgraph 
+langchain 
+langsmith 
+langchain-google-genai 
+langchain-mcp-adapters
+langchain-milvus 
+pymilvus 
+google-genai
+langchain_text_splitters
+requests>=2.31
+pypdf>=5.1.0
+langdetect>=1.0.9
+fastapi>=0.110
+uvicorn[standard]>=0.27
+sse-starlette>=2.0.0
+python-dotenv>=1.0.1
