@@ -1,0 +1,9 @@
+*.pdf
+/volumes/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+*.egg-info/
+dist/
+.env
