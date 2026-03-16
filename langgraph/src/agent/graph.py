@@ -199,14 +199,28 @@ that is genuinely informative AND easy to absorb while relaxed. \
 The listener should remember at least one concrete fact from this chapter.
 
 #Requirements / Constraints:
-- Each chapter must contain at least 2–3 concrete, accurate scientific facts \
-  or mechanisms — not just mood or imagery
+Factual content:
+- Each chapter must convey 2–3 real scientific ideas — not just mood or imagery
+- Always describe a phenomenon in plain, everyday language first before naming it
+- For a "{audience}" audience: if the audience is "curious adults" or \
+  "science enthusiasts", you may then introduce the technical name as an optional \
+  label after the plain description (e.g. "this tendency for heat to spread out — \
+  what scientists call the second law of thermodynamics"); if the audience is \
+  "general public", skip technical names entirely and stay with the plain description
+- Do not invent specific numbers, percentages, or historical lab procedures; \
+  if a precise figure is not very well established, use scale instead \
+  ("millions of years", "a few degrees warmer", "roughly half")
 - Analogies and atmosphere should serve the science, not replace it
-- Do not let more than 3 consecutive sentences pass without grounding the \
-  reader in a specific fact, measurement, name, or mechanism
+
+Audio / narration quality:
+- Write for listening, not reading — a listener cannot re-read a sentence
+- Avoid long nested sentences and dense chains of cause-and-effect in a single sentence; \
+  break them into two or three shorter ones
+- Prefer one main idea per paragraph; do not stack two explanations back to back
+- After a technical point, insert a soft transition — a brief image, an analogy, \
+  or a single quiet sentence — before moving to the next idea
 - Do not use "firstly", "secondly", "finally", or any list-like transitions
 - Do not include the chapter title in your output
-- Sentences should vary in length but favor short ones for a slow, breathing rhythm
 - Do not end on an exciting cliffhanger — close with a sense of calm continuity
 """
 
@@ -246,7 +260,14 @@ appropriately paced, appropriately calm, and flows naturally from what came befo
 #Requirements / Constraints:
 - Check scientific accuracy — flag any errors, outdated claims, or misleading simplifications
 - Check factual density — flag if the chapter is predominantly atmosphere/imagery with fewer \
-  than 2–3 concrete facts, measurements, or named mechanisms; pure mood is not sufficient
+  than 2–3 real scientific ideas; pure mood is not sufficient
+- Check jargon order — for audience "{audience}": if "curious adults" or "science enthusiasts", \
+  technical labels are allowed only when the phenomenon was first explained in plain language \
+  immediately before the label; if "general public", flag any technical label regardless; \
+  also flag any specific number or percentage that appears invented or hard to verify — \
+  prefer scale expressions
+- Check audio quality — flag long nested sentences or back-to-back technical explanations \
+  without a soft transition; a listener cannot re-read, so each idea must land on its own
 - Check tone — it must be soothing and unhurried, suitable for bedtime; flag anything too \
   exciting or intense
 - Check continuity — it must connect naturally to the preceding text
@@ -295,8 +316,13 @@ at least 2–3 concrete scientific facts in an accessible, calm way.
 
 #Requirements / Constraints:
 - Address each bullet point in the reviewer feedback explicitly
-- Each chapter must contain at least 2–3 concrete, accurate scientific facts \
-  or mechanisms — do not let atmosphere crowd out substance
+- Each chapter must convey 2–3 real scientific ideas — do not let atmosphere crowd out substance
+- Always describe a phenomenon in plain language first before naming it; for a \
+  "{audience}" audience, a technical name may follow the plain description as an \
+  optional label — never drop a term without explaining it first
+- Do not invent specific numbers or procedures; use scale expressions if precision is uncertain
+- Avoid long nested sentences — break dense cause-and-effect chains into shorter ones
+- Prefer one main idea per paragraph; insert a soft transition between technical points
 - Do not introduce new scientific inaccuracies while fixing old ones
 - Do not include the chapter title in your output
 - Keep the same narrative position in the story arc — do not jump ahead
@@ -342,7 +368,7 @@ what it said before — just with smoother joins and a more consistent voice.
 """
 
 
-# ── SECTION 3: LLMs & Parser ─────────────────────────────────────────────────
+# ── SECTION 4: LLMs & Parser ─────────────────────────────────────────────────
 
 # Generation: most capable model for rich, creative story writing and polishing
 generation_llm = ChatGoogleGenerativeAI(
@@ -351,13 +377,13 @@ generation_llm = ChatGoogleGenerativeAI(
 
 # Reflection: fast, analytical model for structured quality review
 reflect_llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash", temperature=0.2
+    model="gemini-2.5-flash", temperature=0.2
 )
 
 parser = StrOutputParser()
 
 
-# ── SECTION 4: Node Functions ────────────────────────────────────────────────
+# ── SECTION 5: Node Functions ────────────────────────────────────────────────
 
 
 def _story_so_far(state: StoryState) -> str:
@@ -562,7 +588,7 @@ def polish_story(state: StoryState) -> dict:
     }
 
 
-# ── SECTION 5: Routing ───────────────────────────────────────────────────────
+# ── SECTION 6: Routing ───────────────────────────────────────────────────────
 
 
 def route_after_reflect(state: StoryState) -> str:
@@ -595,7 +621,7 @@ def route_after_advance(state: StoryState) -> str:
     return "polish_story"
 
 
-# ── SECTION 6: Graph Assembly ────────────────────────────────────────────────
+# ── SECTION 7: Graph Assembly ────────────────────────────────────────────────
 
 builder = StateGraph(StoryState)
 
