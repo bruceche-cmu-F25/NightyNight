@@ -473,6 +473,7 @@ def reflect_chapter(state: StoryState) -> dict:
     content = chain.invoke({
         "chapter_num": idx + 1,
         "topic": state["topic"],
+        "audience": state["audience"],
         "words_per_chapter": target,
         "words_per_chapter_min": int(target * 0.75),
         "words_per_chapter_max": int(target * 1.25),
