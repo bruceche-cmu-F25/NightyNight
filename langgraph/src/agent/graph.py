@@ -1,15 +1,32 @@
 import json
+import logging
+import os
 import re
-from typing import Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_milvus import Milvus
 from langgraph.graph import END, StateGraph
+from pymilvus import connections, utility
 from typing_extensions import TypedDict
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+# ── RAG / Milvus Config ───────────────────────────────────────────────────────
+
+_MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+_MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
+_MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "science_knowledge")
+_MILVUS_INDEX = os.getenv("INDEX_TYPE", "HNSW").upper()
+_RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
+_EMB_MODEL = os.getenv("GEMINI_EMB_MODEL", "gemini-embedding-001")
 
 # ── SECTION 1: State ─────────────────────────────────────────────────────────
 
@@ -17,6 +34,12 @@ load_dotenv()
 class ChapterPlan(TypedDict):
     title: str    # e.g. "The Night Everything Began"
     summary: str  # 1-2 sentence description of what this chapter covers
+
+
+class FactVerification(TypedDict):
+    fact: str      # the extracted factual claim
+    verdict: str   # "supported" | "contradicted" | "unknown"
+    evidence: str  # brief summary of retrieved evidence (or empty string)
 
 
 class _StoryStateRequired(TypedDict, total=True):
@@ -50,6 +73,9 @@ class StoryState(_StoryStateRequired, total=False):
     forced_chapters: list[int]         # indices of chapters force-advanced after max retries
     final_story: Optional[str]         # set by polish_story
     status_message: Optional[str]
+
+    # ── RAG fact-verification (set by verify_facts, consumed by reflect_chapter) ──
+    fact_verification_results: Optional[list[FactVerification]]
 
 
 # ── SECTION 2: Duration → Story Parameter Helper ─────────────────────────────
@@ -276,6 +302,15 @@ appropriately paced, appropriately calm, and flows naturally from what came befo
   a chapter that is too short will leave dead air, too long will overrun the episode runtime
 - Do NOT rewrite the chapter; only identify issues
 - Be concise in your feedback — one line per issue
+
+## RAG Fact-Verification Results
+The following facts were extracted from this chapter and checked against the knowledge base:
+{fact_verification_results}
+
+Treat "contradicted" verdicts as high-priority issues — flag each one explicitly.
+"unknown" verdicts mean no evidence was found; flag them only if the claim seems \
+implausible or too specific to be stated without a source.
+"supported" facts do not need to be flagged.
 """
 
 REVISE_CHAPTER_PROMPT = """\
@@ -380,7 +415,97 @@ reflect_llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash", temperature=0.2
 )
 
+# Fact verification: temperature=0 for deterministic supported/contradicted/unknown judgments
+verify_llm = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash", temperature=0.0
+)
+
 parser = StrOutputParser()
+
+
+# ── SECTION 4b: RAG Helpers ───────────────────────────────────────────────────
+
+_embeddings: Optional[GoogleGenerativeAIEmbeddings] = None
+_vector_store: Optional[Milvus] = None
+
+
+def _get_vector_store() -> Optional[Milvus]:
+    """Return a cached Milvus connection, or None if Milvus is unavailable."""
+    global _embeddings, _vector_store
+    if _vector_store is not None:
+        return _vector_store
+    try:
+        if _embeddings is None:
+            _embeddings = GoogleGenerativeAIEmbeddings(model=_EMB_MODEL)
+        conn_args: Dict[str, Any] = {"uri": _MILVUS_URI}
+        if _MILVUS_TOKEN:
+            conn_args["token"] = _MILVUS_TOKEN
+        _vector_store = Milvus(
+            embedding_function=_embeddings,
+            collection_name=_MILVUS_COLLECTION,
+            connection_args=conn_args,
+            index_params={"index_type": _MILVUS_INDEX, "metric_type": "COSINE",
+                          "params": {"M": 16, "efConstruction": 200}},
+            search_params={"metric_type": "COSINE", "params": {"ef": 64}},
+            auto_id=True,
+            drop_old=False,
+        )
+        return _vector_store
+    except Exception as exc:
+        logger.warning("Milvus unavailable — verify_facts will skip RAG: %s", exc)
+        return None
+
+
+def _search(query: str, domain: str, top_k: int = _RAG_TOP_K) -> List[Document]:
+    vs = _get_vector_store()
+    if vs is None:
+        return []
+    try:
+        search_kwargs: Dict[str, Any] = {"k": top_k}
+        if domain:
+            search_kwargs["expr"] = f'domain == "{domain}"'
+        return vs.as_retriever(search_kwargs=search_kwargs).invoke(query)
+    except Exception as exc:
+        logger.warning("RAG search failed: %s", exc)
+        return []
+
+
+# ── SECTION 4c: Fact-Verification Prompts ────────────────────────────────────
+
+_EXTRACT_FACTS_PROMPT = """\
+Extract the key verifiable scientific facts from the chapter below.
+Focus only on specific, checkable claims: numbers, mechanisms, named phenomena, \
+historical events, or cause-effect relationships.
+Skip atmospheric descriptions, transitions, and rhetorical sentences.
+
+Return ONLY a JSON array of strings — no markdown, no commentary, no extra keys.
+Aim for 3–6 items. If there are fewer real facts, return fewer.
+
+Chapter:
+---
+{chapter_text}
+---
+"""
+
+_JUDGE_FACT_PROMPT = """\
+You are a scientific fact-checker.
+
+Fact to check:
+"{fact}"
+
+Evidence from the knowledge base (may be empty):
+---
+{evidence}
+---
+
+Verdict options:
+- "supported"    — the evidence clearly confirms the fact
+- "contradicted" — the evidence clearly contradicts the fact
+- "unknown"      — the evidence is absent, ambiguous, or not specific enough to judge
+
+Reply with ONLY a JSON object, no markdown:
+{{"verdict": "<supported|contradicted|unknown>", "reason": "<one short sentence>"}}
+"""
 
 
 # ── SECTION 5: Node Functions ────────────────────────────────────────────────
@@ -464,6 +589,71 @@ def write_chapter(state: StoryState) -> dict:
     }
 
 
+def verify_facts(state: StoryState) -> dict:
+    """Extract verifiable facts from the current draft and check each against Milvus.
+
+    Uses reflect_llm (temperature=0) for deterministic verdicts.
+    Gracefully degrades to empty results if Milvus is unavailable.
+    """
+    idx = state["current_chapter_index"]
+    chapter_text = state["current_chapter_draft"] or ""
+    domain = state.get("domain", "")
+
+    # Step 1: extract checkable facts from the chapter
+    extract_chain = PromptTemplate.from_template(_EXTRACT_FACTS_PROMPT) | verify_llm | parser
+    raw_facts = extract_chain.invoke({"chapter_text": chapter_text}).strip()
+    raw_facts = re.sub(r"^```(?:json)?\s*", "", raw_facts)
+    raw_facts = re.sub(r"\s*```$", "", raw_facts)
+
+    try:
+        facts: List[str] = json.loads(raw_facts)
+        if not isinstance(facts, list):
+            facts = []
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("fact extraction returned non-JSON; skipping RAG verify")
+        facts = []
+
+    # Step 2: for each fact, retrieve evidence and judge
+    results: List[FactVerification] = []
+    judge_chain = PromptTemplate.from_template(_JUDGE_FACT_PROMPT) | verify_llm | parser
+
+    for fact in facts:
+        docs = _search(fact, domain)
+        evidence = "\n".join(f"- {d.page_content}" for d in docs) if docs else "(no evidence retrieved)"
+
+        raw_verdict = judge_chain.invoke({"fact": fact, "evidence": evidence}).strip()
+        raw_verdict = re.sub(r"^```(?:json)?\s*", "", raw_verdict)
+        raw_verdict = re.sub(r"\s*```$", "", raw_verdict)
+
+        try:
+            judgment = json.loads(raw_verdict)
+            verdict = judgment.get("verdict", "unknown")
+            reason = judgment.get("reason", "")
+        except (json.JSONDecodeError, ValueError):
+            verdict, reason = "unknown", ""
+
+        results.append(FactVerification(fact=fact, verdict=verdict, evidence=reason))
+
+    contradicted = sum(1 for r in results if r["verdict"] == "contradicted")
+    status = (
+        f"Chapter {idx + 1} facts verified: "
+        f"{sum(1 for r in results if r['verdict'] == 'supported')} supported, "
+        f"{contradicted} contradicted, "
+        f"{sum(1 for r in results if r['verdict'] == 'unknown')} unknown."
+    )
+    return {"fact_verification_results": results, "status_message": status}
+
+
+def _format_fact_verification(results: Optional[List[FactVerification]]) -> str:
+    if not results:
+        return "(no fact-verification results available)"
+    lines = []
+    for r in results:
+        lines.append(f"- [{r['verdict'].upper()}] {r['fact']}"
+                     + (f" — {r['evidence']}" if r["evidence"] else ""))
+    return "\n".join(lines)
+
+
 def reflect_chapter(state: StoryState) -> dict:
     """Evaluate the current draft for scientific accuracy, tone, and continuity."""
     idx = state["current_chapter_index"]
@@ -479,6 +669,9 @@ def reflect_chapter(state: StoryState) -> dict:
         "words_per_chapter_max": int(target * 1.25),
         "current_chapter_draft": state["current_chapter_draft"],
         "story_so_far": _story_so_far(state),
+        "fact_verification_results": _format_fact_verification(
+            state.get("fact_verification_results")
+        ),
     }).strip()
 
     passed = content.startswith("PASSED")
@@ -569,6 +762,7 @@ def advance_chapter(state: StoryState) -> dict:
         "reflect_feedback": None,
         "reflect_passed": None,
         "chapter_rewrite_count": 0,
+        "fact_verification_results": None,
         "status_message": status,
     }
 
@@ -628,6 +822,7 @@ builder = StateGraph(StoryState)
 
 builder.add_node("plan_story", plan_story)
 builder.add_node("write_chapter", write_chapter)
+builder.add_node("verify_facts", verify_facts)
 builder.add_node("reflect_chapter", reflect_chapter)
 builder.add_node("revise_chapter", revise_chapter)
 builder.add_node("iterate_chapter", iterate_chapter)
@@ -636,7 +831,8 @@ builder.add_node("polish_story", polish_story)
 
 builder.set_entry_point("plan_story")
 builder.add_edge("plan_story", "write_chapter")
-builder.add_edge("write_chapter", "reflect_chapter")
+builder.add_edge("write_chapter", "verify_facts")
+builder.add_edge("verify_facts", "reflect_chapter")
 builder.add_conditional_edges(
     "reflect_chapter",
     route_after_reflect,
