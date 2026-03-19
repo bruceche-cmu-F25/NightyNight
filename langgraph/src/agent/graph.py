@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -76,6 +77,10 @@ class StoryState(_StoryStateRequired, total=False):
 
     # ── RAG fact-verification (set by verify_facts, consumed by reflect_chapter) ──
     fact_verification_results: Optional[list[FactVerification]]
+
+    # ── Resolved RAG domain (set by plan_story) ───────────────────────────────
+    # One of "cosmos" | "life" | "civilization" | None (None = search all domains)
+    rag_domain: Optional[str]
 
 
 # ── SECTION 2: Duration → Story Parameter Helper ─────────────────────────────
@@ -308,8 +313,10 @@ The following facts were extracted from this chapter and checked against the kno
 {fact_verification_results}
 
 Treat "contradicted" verdicts as high-priority issues — flag each one explicitly.
-"unknown" verdicts mean no evidence was found; flag them only if the claim seems \
-implausible or too specific to be stated without a source.
+"unknown" means no evidence was found AND the claim is overly specific or unverifiable — \
+flag it and ask the writer to hedge the language (e.g. "some researchers suggest...").
+"not_in_kb" means no evidence was found but the claim is a well-known scientific concept \
+or named theory — do NOT flag these; absence from the knowledge base is not an error.
 "supported" facts do not need to be flagged.
 """
 
@@ -362,6 +369,16 @@ at least 2–3 concrete scientific facts in an accessible, calm way.
 - Do not include the chapter title in your output
 - Keep the same narrative position in the story arc — do not jump ahead
 - Maintain the calm, soothing tone throughout
+
+#Handling RAG-flagged claims (UNKNOWN verdict):
+When the reviewer flags a claim because it could not be verified against the knowledge base, \
+DO NOT delete the content — hedge the certainty of the language instead. \
+The scientific substance must stay; only the confidence level should change. \
+Use phrases such as: "scientists believe...", "evidence suggests...", \
+"researchers have proposed...", "one widely held idea is...", \
+"some estimates place this at around...", "according to some researchers...". \
+Apply this to: specific dates, named locations, named hypotheses, and causal chains \
+that are plausible but not universally confirmed in the sources.
 """
 
 POLISH_PROMPT = """\
@@ -470,7 +487,147 @@ def _search(query: str, domain: str, top_k: int = _RAG_TOP_K) -> List[Document]:
         return []
 
 
-# ── SECTION 4c: Fact-Verification Prompts ────────────────────────────────────
+# Chunking params (override via env)
+_CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
+_CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
+
+
+def ingest_sources(sources_dir: str, drop_old: bool = False) -> Dict[str, Any]:
+    """Chunk and index all PDFs under sources_dir/{domain}/ into Milvus.
+
+    Expected layout:
+        sources_dir/
+            cosmos/         ← folder name becomes the domain tag
+                book.pdf
+            life/
+                bio.pdf
+            civilization/
+                history.pdf
+
+    Each chunk is stored with metadata: {domain, source, chunk_id}.
+    Call with drop_old=True to wipe and rebuild the collection from scratch.
+    """
+    from io import BytesIO
+
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from pypdf import PdfReader
+
+    global _embeddings  # noqa: PLW0603
+    if _embeddings is None:
+        _embeddings = GoogleGenerativeAIEmbeddings(model=_EMB_MODEL)
+
+    conn_args: Dict[str, Any] = {"uri": _MILVUS_URI}
+    if _MILVUS_TOKEN:
+        conn_args["token"] = _MILVUS_TOKEN
+
+    vs = Milvus(
+        embedding_function=_embeddings,
+        collection_name=_MILVUS_COLLECTION,
+        connection_args=conn_args,
+        index_params={"index_type": _MILVUS_INDEX, "metric_type": "COSINE",
+                      "params": {"M": 16, "efConstruction": 200}},
+        search_params={"metric_type": "COSINE", "params": {"ef": 64}},
+        auto_id=True,
+        drop_old=drop_old,
+    )
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=_CHUNK_SIZE,
+        chunk_overlap=_CHUNK_OVERLAP,
+        separators=["\n\n", "\n", " ", ""],
+    )
+
+    all_docs: List[Document] = []
+    domain_stats: Dict[str, int] = {}
+    skipped: List[str] = []
+
+    for domain_entry in sorted(os.scandir(sources_dir), key=lambda e: e.name):
+        if not domain_entry.is_dir():
+            continue
+        domain = domain_entry.name
+        pdf_count = 0
+
+        for file_entry in sorted(os.scandir(domain_entry.path), key=lambda e: e.name):
+            if not file_entry.is_file() or not file_entry.name.lower().endswith(".pdf"):
+                continue
+            try:
+                raw_bytes = Path(file_entry.path).read_bytes()
+                reader = PdfReader(BytesIO(raw_bytes))
+                full_text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+                if not full_text:
+                    raise ValueError("no extractable text")
+            except Exception as exc:
+                logger.warning("Skipping %s: %s", file_entry.path, exc)
+                skipped.append(file_entry.name)
+                continue
+
+            for i, chunk in enumerate(splitter.split_text(full_text)):
+                all_docs.append(Document(
+                    page_content=chunk,
+                    metadata={"domain": domain, "source": file_entry.name, "chunk_id": i},
+                ))
+            pdf_count += 1
+
+        domain_stats[domain] = pdf_count
+
+    # Batch insert to avoid hitting the Gemini embedding rate limit (3000 req/min).
+    # Each add_documents call embeds one batch; pause between batches.
+    _INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "200"))
+    _INGEST_BATCH_PAUSE = float(os.getenv("INGEST_BATCH_PAUSE_SEC", "5"))
+
+    for batch_start in range(0, len(all_docs), _INGEST_BATCH_SIZE):
+        batch = all_docs[batch_start: batch_start + _INGEST_BATCH_SIZE]
+        vs.add_documents(batch)
+        logger.info(
+            "Ingested chunks %d–%d / %d",
+            batch_start + 1, batch_start + len(batch), len(all_docs),
+        )
+        if batch_start + _INGEST_BATCH_SIZE < len(all_docs):
+            time.sleep(_INGEST_BATCH_PAUSE)
+
+    logger.info("Ingested %d chunks across domains: %s", len(all_docs), domain_stats)
+
+    return {
+        "total_chunks": len(all_docs),
+        "chunk_size": _CHUNK_SIZE,
+        "chunk_overlap": _CHUNK_OVERLAP,
+        "domains": domain_stats,
+        "skipped": skipped,
+    }
+
+
+# ── SECTION 4c: Domain Classifier ────────────────────────────────────────────
+
+_DOMAIN_CLASSIFIER_PROMPT = """\
+You have a knowledge base with exactly three domain folders:
+- "cosmos"       — astronomy, astrophysics, cosmology, space, physics, the universe
+- "life"         — biology, ecology, evolution, genetics, neuroscience, medicine
+- "civilization" — history, archaeology, anthropology, ancient cultures, world civilizations
+
+Given the topic below, decide which folder is the best match.
+If the topic clearly belongs to one of the three, return that folder name.
+If the topic spans multiple folders or does not fit any, return "other".
+
+Topic: {topic}
+
+Reply with ONLY one word: cosmos | life | civilization | other
+"""
+
+
+def _classify_rag_domain(topic: str) -> Optional[str]:
+    """Map the story topic to a known Milvus folder, or None to search all domains."""
+    raw = (
+        PromptTemplate.from_template(_DOMAIN_CLASSIFIER_PROMPT)
+        | reflect_llm
+        | parser
+    ).invoke({"topic": topic}).strip().lower()
+
+    resolved = raw if raw in {"cosmos", "life", "civilization"} else None
+    logger.info("[domain_classifier] topic='%s' → rag_domain='%s'", topic, resolved)
+    return resolved
+
+
+# ── SECTION 4d: Fact-Verification Prompts ────────────────────────────────────
 
 _EXTRACT_FACTS_PROMPT = """\
 Extract the key verifiable scientific facts from the chapter below.
@@ -499,12 +656,17 @@ Evidence from the knowledge base (may be empty):
 ---
 
 Verdict options:
-- "supported"    — the evidence clearly confirms the fact
-- "contradicted" — the evidence clearly contradicts the fact
-- "unknown"      — the evidence is absent, ambiguous, or not specific enough to judge
+- "supported"    — the retrieved evidence clearly confirms the fact
+- "contradicted" — the retrieved evidence clearly contradicts the fact
+- "unknown"      — no evidence was retrieved AND the claim is overly specific, states a \
+  precise figure, or references an obscure concept that cannot be assumed as general \
+  knowledge — the narration should hedge or soften this claim
+- "not_in_kb"    — no evidence was retrieved BUT the claim describes a well-known, widely \
+  accepted scientific concept or named theory; absence from the knowledge base does not \
+  make it suspect — no action needed
 
 Reply with ONLY a JSON object, no markdown:
-{{"verdict": "<supported|contradicted|unknown>", "reason": "<one short sentence>"}}
+{{"verdict": "<supported|contradicted|unknown|not_in_kb>", "reason": "<one short sentence>"}}
 """
 
 
@@ -521,6 +683,10 @@ def _story_so_far(state: StoryState) -> str:
 
 def plan_story(state: StoryState) -> dict:
     """Derive story parameters from duration, then generate the chapter outline."""
+    logger.info("=" * 60)
+    logger.info("[plan_story] topic='%s' domain='%s' duration=%dmin",
+                state["topic"], state["domain"], state["duration_min"])
+    rag_domain = _classify_rag_domain(state["topic"])
     num_chapters, target_total_words, words_per_chapter = derive_story_params(
         state["duration_min"]
     )
@@ -542,12 +708,15 @@ def plan_story(state: StoryState) -> dict:
     raw = re.sub(r"\s*```$", "", raw)
 
     chapter_plans = _parse_chapter_plans(raw, num_chapters)
+    for i, p in enumerate(chapter_plans):
+        logger.info("  ch%d: %s — %s", i + 1, p["title"], p["summary"])
 
     return {
         "num_chapters": num_chapters,
         "target_total_words": target_total_words,
         "words_per_chapter": words_per_chapter,
         "chapter_plans": chapter_plans,
+        "rag_domain": rag_domain,
         "current_chapter_index": 0,
         "current_chapter_draft": None,
         "reflect_feedback": None,
@@ -567,6 +736,8 @@ def write_chapter(state: StoryState) -> dict:
     """Write the initial draft of the current chapter (no prior feedback)."""
     idx = state["current_chapter_index"]
     plan = state["chapter_plans"][idx]
+    logger.info("-" * 60)
+    logger.info("[write_chapter] ch%d/%d: '%s'", idx + 1, state["num_chapters"], plan["title"])
 
     chain = PromptTemplate.from_template(WRITE_CHAPTER_PROMPT) | generation_llm | parser
     draft = chain.invoke({
@@ -582,9 +753,12 @@ def write_chapter(state: StoryState) -> dict:
         "story_so_far": _story_so_far(state),
     }).strip()
 
+    word_count = len(draft.split())
+    logger.info("[write_chapter] ch%d done — %d words", idx + 1, word_count)
+
     return {
         "current_chapter_draft": draft,
-        "reflect_feedback": None,   # clear any stale feedback from a previous chapter
+        "reflect_feedback": None,
         "status_message": f"Chapter {idx + 1}/{len(state['chapter_plans'])} drafted: \"{plan['title']}\"",
     }
 
@@ -596,8 +770,8 @@ def verify_facts(state: StoryState) -> dict:
     Gracefully degrades to empty results if Milvus is unavailable.
     """
     idx = state["current_chapter_index"]
+    logger.info("[verify_facts] ch%d — extracting facts from draft...", idx + 1)
     chapter_text = state["current_chapter_draft"] or ""
-    domain = state.get("domain", "")
 
     # Step 1: extract checkable facts from the chapter
     extract_chain = PromptTemplate.from_template(_EXTRACT_FACTS_PROMPT) | verify_llm | parser
@@ -610,15 +784,31 @@ def verify_facts(state: StoryState) -> dict:
         if not isinstance(facts, list):
             facts = []
     except (json.JSONDecodeError, ValueError):
-        logger.warning("fact extraction returned non-JSON; skipping RAG verify")
+        logger.warning("[verify_facts] ch%d — fact extraction returned non-JSON; skipping RAG verify", idx + 1)
         facts = []
+
+    logger.info("[verify_facts] ch%d — extracted %d facts: %s", idx + 1, len(facts), facts)
 
     # Step 2: for each fact, retrieve evidence and judge
     results: List[FactVerification] = []
     judge_chain = PromptTemplate.from_template(_JUDGE_FACT_PROMPT) | verify_llm | parser
 
     for fact in facts:
-        docs = _search(fact, domain)
+        docs = _search(fact, state.get("rag_domain") or "")
+        if docs:
+            logger.info(
+                "[verify_facts] ch%d | fact: %s\n  retrieved %d chunk(s):\n%s",
+                idx + 1,
+                fact,
+                len(docs),
+                "\n".join(
+                    f"  [{i+1}] ({d.metadata.get('source','?')} p{d.metadata.get('chunk_id','?')}) "
+                    f"{d.page_content[:200]!r}..."
+                    for i, d in enumerate(docs)
+                ),
+            )
+        else:
+            logger.info("[verify_facts] ch%d | fact: %s → no chunks retrieved", idx + 1, fact)
         evidence = "\n".join(f"- {d.page_content}" for d in docs) if docs else "(no evidence retrieved)"
 
         raw_verdict = judge_chain.invoke({"fact": fact, "evidence": evidence}).strip()
@@ -628,10 +818,13 @@ def verify_facts(state: StoryState) -> dict:
         try:
             judgment = json.loads(raw_verdict)
             verdict = judgment.get("verdict", "unknown")
+            if verdict not in {"supported", "contradicted", "unknown", "not_in_kb"}:
+                verdict = "unknown"
             reason = judgment.get("reason", "")
         except (json.JSONDecodeError, ValueError):
             verdict, reason = "unknown", ""
 
+        logger.info("[verify_facts] ch%d | [%s] %s — %s", idx + 1, verdict.upper(), fact, reason)
         results.append(FactVerification(fact=fact, verdict=verdict, evidence=reason))
 
     contradicted = sum(1 for r in results if r["verdict"] == "contradicted")
@@ -675,6 +868,11 @@ def reflect_chapter(state: StoryState) -> dict:
     }).strip()
 
     passed = content.startswith("PASSED")
+    logger.info("[reflect_chapter] ch%d — %s", idx + 1, "PASSED" if passed else "NEEDS_REVISION")
+    if not passed:
+        for line in content.splitlines()[1:]:
+            if line.strip():
+                logger.info("  %s", line.strip())
     return {
         "reflect_feedback": content,
         "reflect_passed": passed,
@@ -722,6 +920,8 @@ def revise_chapter(state: StoryState) -> dict:
         "reflect_feedback": state["reflect_feedback"],
     }).strip()
 
+    word_count = len(revised.split())
+    logger.info("[revise_chapter] ch%d done — %d words", idx + 1, word_count)
     return {
         "current_chapter_draft": revised,
         "status_message": f"Chapter {idx + 1} revised based on feedback.",
@@ -769,6 +969,8 @@ def advance_chapter(state: StoryState) -> dict:
 
 def polish_story(state: StoryState) -> dict:
     """Final editing pass over the assembled story for consistent tone and flow."""
+    logger.info("=" * 60)
+    logger.info("[polish_story] all %d chapters done, running final polish...", len(state["completed_chapters"]))
     joined = "\n\n".join(state["completed_chapters"])
 
     chain = PromptTemplate.from_template(POLISH_PROMPT) | generation_llm | parser
@@ -777,6 +979,7 @@ def polish_story(state: StoryState) -> dict:
         "target_total_words": state["target_total_words"],
     }).strip()
 
+    logger.info("[polish_story] done — final story %d words", len(polished.split()))
     return {
         "final_story": polished,
         "status_message": "Story complete and polished.",

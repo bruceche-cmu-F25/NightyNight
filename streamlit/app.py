@@ -31,11 +31,6 @@ with st.form("generate_form"):
             options=[8, 10, 15, 20, 25],
             value=15,
         )
-        domain = st.text_input(
-            "Science domain",
-            value="general science",
-            placeholder="e.g. cosmology, biology",
-        )
     with col2:
         style = st.selectbox(
             "Narration style",
@@ -76,7 +71,7 @@ if submitted:
         "duration_min": duration_min,
         "style": style,
         "audience": audience,
-        "domain": domain.strip() or "general science",
+        "domain": "general science",
     }
 
     final_story = None

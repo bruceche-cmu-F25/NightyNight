@@ -1,21 +1,75 @@
 import json
+import logging
 import os
+from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from agent.graph import StoryState, graph
+from agent.graph import StoryState, graph, ingest_sources
+
+logger = logging.getLogger(__name__)
+
+# Sources directory is at the repo root: CountingStars/sources/
+_SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
 
 load_dotenv()
+
+_agent_logger = logging.getLogger("agent")
+_agent_logger.setLevel(logging.INFO)
+if not _agent_logger.handlers:
+    _agent_logger.addHandler(logging.StreamHandler())
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="CountingStars API", version="0.1.0")
+
+
+@app.on_event("startup")
+async def auto_index_on_startup() -> None:
+    """Index sources/ into Milvus on first boot if the collection doesn't exist yet.
+
+    Uses utility.has_collection() as the authoritative check — no false negatives
+    from empty search results. Restarts are instant if the collection already exists.
+    To force a full rebuild, call POST /index?drop_old=true manually.
+    """
+    from pymilvus import connections, utility
+    from agent.graph import _MILVUS_URI, _MILVUS_TOKEN, _MILVUS_COLLECTION
+
+    if not Path(_SOURCES_DIR).is_dir():
+        logger.warning("sources dir not found at %s — skipping auto-index", _SOURCES_DIR)
+        return
+
+    try:
+        connections.connect(uri=_MILVUS_URI, token=_MILVUS_TOKEN or None)
+        if utility.has_collection(_MILVUS_COLLECTION):
+            logger.info("Milvus collection '%s' already exists — skipping auto-index.", _MILVUS_COLLECTION)
+            # Warm up the vector store cache here (async context) so verify_facts
+            # doesn't trigger AsyncMilvusClient warnings on its first sync call.
+            from agent.graph import _get_vector_store
+            _get_vector_store()
+            return
+    except Exception as exc:
+        logger.warning("Could not reach Milvus (%s) — skipping auto-index.", exc)
+        return
+
+    logger.info("Collection not found — starting auto-index...")
+    try:
+        summary = ingest_sources(_SOURCES_DIR, drop_old=False)
+        logger.info("Auto-index complete: %s", summary)
+    except Exception as exc:
+        logger.error("Auto-index failed (server will still start): %s", exc)
+        return
+
+    # Warm up the cached vector store here (async context) so the first call
+    # from verify_facts (sync node) doesn't trigger the AsyncMilvusClient warning.
+    from agent.graph import _get_vector_store
+    _get_vector_store()
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,6 +123,7 @@ def _sse(payload: dict) -> str:
 _PROGRESS_NODES = {
     "plan_story",
     "write_chapter",
+    "verify_facts",
     "reflect_chapter",
     "revise_chapter",
     "iterate_chapter",
@@ -146,6 +201,23 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.post("/index")
+async def index(drop_old: bool = False) -> JSONResponse:
+    """Scan sources/ PDFs and (re-)index them into Milvus.
+
+    Pass ?drop_old=true to wipe the collection and rebuild from scratch.
+    Safe to call again to add newly added PDFs without wiping existing data.
+    """
+    if not Path(_SOURCES_DIR).is_dir():
+        raise HTTPException(status_code=500, detail=f"sources dir not found: {_SOURCES_DIR}")
+    try:
+        summary = ingest_sources(_SOURCES_DIR, drop_old=drop_old)
+        return JSONResponse(content={"status": "ok", **summary})
+    except Exception as exc:
+        logger.error("/index failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.post("/generate")
