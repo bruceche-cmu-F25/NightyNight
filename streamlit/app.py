@@ -16,6 +16,19 @@ st.set_page_config(
 st.title("CountingStars")
 st.caption("A bedtime science story, made just for tonight.")
 
+# ── Session state init ────────────────────────────────────────────────────────
+
+if "final_story" not in st.session_state:
+    st.session_state.final_story = None
+if "forced_chapters" not in st.session_state:
+    st.session_state.forced_chapters = []
+if "topic" not in st.session_state:
+    st.session_state.topic = ""
+if "audio_url" not in st.session_state:
+    st.session_state.audio_url = None
+if "audio_info" not in st.session_state:
+    st.session_state.audio_info = {}
+
 # ── Input form ────────────────────────────────────────────────────────────────
 
 with st.form("generate_form"):
@@ -41,7 +54,22 @@ with st.form("generate_form"):
             ["curious adults", "science enthusiasts", "general public"],
         )
 
-    submitted = st.form_submit_button("Generate", type="primary", use_container_width=True)
+    col3, col4 = st.columns(2)
+    with col3:
+        ambient_choice = st.selectbox(
+            "Ambient sound",
+            ["fire", "rain", "ocean", "woods", "none"],
+            index=0,
+        )
+    with col4:
+        voice_choice = st.selectbox(
+            "Voice",
+            ["Aoede", "Sulafat", "Achernar", "Vindemiatrix", "Umbriel", "Kore", "Charon"],
+            index=0,
+            help="Aoede=Breezy · Sulafat=Warm · Achernar=Soft · Vindemiatrix=Gentle · Umbriel=Easy-going",
+        )
+
+    submitted = st.form_submit_button("Generate story + audio", type="primary", use_container_width=True)
 
 # ── Generation & streaming ────────────────────────────────────────────────────
 
@@ -50,12 +78,17 @@ if submitted:
         st.warning("Please enter a topic.")
         st.stop()
 
-    status_box   = st.empty()
-    progress_bar = st.progress(0)
-    warning_box  = st.empty()
+    # Clear previous results when a new story is requested
+    st.session_state.final_story = None
+    st.session_state.audio_url = None
+    st.session_state.audio_info = {}
+    st.session_state.topic = topic.strip()
+
+    status_box    = st.empty()
+    progress_bar  = st.progress(0)
+    warning_box   = st.empty()
     story_placeholder = st.empty()
 
-    # Node → rough progress percentage (never goes backwards)
     _NODE_PROGRESS = {
         "plan_story":      10,
         "write_chapter":   30,
@@ -123,7 +156,7 @@ if submitted:
                     final_story     = data.get("final_story", "")
                     forced_chapters = data.get("forced_chapters", [])
                     progress_bar.progress(100)
-                    status_box.success("Story ready.")
+                    status_box.success("Story ready — generating audio...")
 
                 elif event == "error":
                     progress_bar.empty()
@@ -140,24 +173,66 @@ if submitted:
         st.error(f"Unexpected error: {e}")
         st.stop()
 
-    # ── Display result ────────────────────────────────────────────────────────
-
-    if final_story:
-        if forced_chapters:
-            warning_box.warning(
-                f"Chapter(s) {[c + 1 for c in forced_chapters]} were accepted after "
-                "reaching the maximum revision attempts. Quality may vary."
-            )
-
-        st.divider()
-        st.subheader("Your story")
-        story_placeholder.markdown(final_story)
-
-        st.download_button(
-            label="Download as .txt",
-            data=final_story,
-            file_name=f"{topic[:40].replace(' ', '_')}.txt",
-            mime="text/plain",
-        )
-    else:
+    if not final_story:
         st.warning("Generation finished but no story was returned.")
+        st.stop()
+
+    # Save story to session state so it survives reruns
+    st.session_state.final_story = final_story
+    st.session_state.forced_chapters = forced_chapters
+
+    # ── Auto-generate audio immediately after story ───────────────────────────
+
+    story_placeholder.markdown(final_story)
+
+    with st.spinner("Synthesizing narration..."):
+        try:
+            audio_resp = requests.post(
+                f"{API_BASE}/generate-audio",
+                json={
+                    "story_text": final_story,
+                    "ambient": ambient_choice,
+                    "voice": voice_choice,
+                },
+                timeout=600,
+            )
+            audio_resp.raise_for_status()
+            audio_data = audio_resp.json()
+            st.session_state.audio_url  = f"{API_BASE}{audio_data['audio_url']}"
+            st.session_state.audio_info = audio_data
+            status_box.success("Ready.")
+        except Exception as e:
+            status_box.warning(f"Audio generation failed: {e}")
+
+# ── Display persisted result ──────────────────────────────────────────────────
+
+if st.session_state.final_story:
+    final_story     = st.session_state.final_story
+    forced_chapters = st.session_state.forced_chapters
+
+    if forced_chapters:
+        st.warning(
+            f"Chapter(s) {[c + 1 for c in forced_chapters]} were accepted after "
+            "reaching the maximum revision attempts. Quality may vary."
+        )
+
+    st.divider()
+    st.subheader("Your story")
+    st.markdown(final_story)
+
+    st.download_button(
+        label="Download as .txt",
+        data=final_story,
+        file_name=f"{st.session_state.topic[:40].replace(' ', '_')}.txt",
+        mime="text/plain",
+    )
+
+    if st.session_state.audio_url:
+        st.divider()
+        st.subheader("Listen")
+        st.audio(st.session_state.audio_url, format="audio/mp3")
+        info = st.session_state.audio_info
+        mins = info.get("duration_seconds", 0) // 60
+        st.caption(
+            f"Duration: ~{mins} min  |  Ambient: {info.get('ambient_mixed', 'none')}"
+        )

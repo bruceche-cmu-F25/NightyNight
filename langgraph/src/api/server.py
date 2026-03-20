@@ -1,6 +1,11 @@
+import asyncio
+import hashlib
 import json
 import logging
+import math
 import os
+import re
+from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -17,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 # Sources directory is at the repo root: CountingStars/sources/
 _SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
+
+# Ambient sounds directory: CountingStars/sounds/ (or override via SOUNDS_DIR env var)
+_SOUNDS_DIR = os.environ.get("SOUNDS_DIR", str(Path(__file__).resolve().parents[3] / "sounds"))
+
+# One representative file per ambient category
+_AMBIENT_FILES: dict[str, str] = {
+    "fire":  "fire/fire01.mp3",
+    "rain":  "rain/Light rain recordings mixed settings-01.wav",
+    "ocean": "ocean/ocean01.mp3",
+    "woods": "woods/woods01.mp3",
+}
 
 load_dotenv()
 
@@ -84,7 +100,144 @@ os.makedirs(AUDIO_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 
+# ── TTS helpers ───────────────────────────────────────────────────────────────
+
+def _chunk_text(text: str, max_chars: int = 4500) -> list[str]:
+    """Split text on sentence boundaries so no chunk exceeds max_chars bytes."""
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks: list[str] = []
+    current = ""
+    for sentence in sentences:
+        # Hard-split a single sentence that is itself too long
+        if len(sentence) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            for i in range(0, len(sentence), max_chars):
+                chunks.append(sentence[i : i + max_chars])
+            continue
+        if len(current) + len(sentence) + 1 > max_chars:
+            if current:
+                chunks.append(current.strip())
+            current = sentence
+        else:
+            current += (" " if current else "") + sentence
+    if current:
+        chunks.append(current.strip())
+    return [c for c in chunks if c]
+
+
+def _pick_ambient_file(ambient: str) -> str | None:
+    """Return the absolute path to the ambient file, or None if not found."""
+    relative = _AMBIENT_FILES.get(ambient)
+    if not relative:
+        return None
+    path = Path(_SOUNDS_DIR) / relative
+    return str(path) if path.exists() else None
+
+
+def _synthesize_blocking(
+    story_text: str,
+    voice_name: str,
+    ambient: str,
+    ambient_db: float,
+    out_path: str,
+) -> tuple[int, int]:
+    """Synthesize story text via Gemini TTS, optionally mix ambient sound.
+
+    Returns (duration_ms, chunks_synthesized).
+    Runs synchronously — call via run_in_executor to avoid blocking the event loop.
+    """
+    import wave
+    from google import genai
+    from google.genai import types
+    from pydub import AudioSegment
+
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    client = genai.Client(api_key=api_key)
+
+    # Gemini TTS has a 32k token limit — chunk conservatively for reliability
+    chunks = _chunk_text(story_text, max_chars=4000)
+    narration = AudioSegment.empty()
+
+    for chunk in chunks:
+        prompt = (
+            "# AUDIO PROFILE: Bedtime Science Narrator\n\n"
+            "## DIRECTOR'S NOTES\n"
+            "Style: Warm, calm, reassuring bedtime narrator — like David Attenborough reading a "
+            "bedtime story. Full, clear voice with a relaxed and soothing tone. "
+            "Do NOT whisper. Do NOT drop volume. Maintain a steady, full vocal presence throughout. "
+            "The listener is lying in bed drifting off — the voice should feel like a gentle, "
+            "trustworthy companion guiding them through the story.\n"
+            "Pacing: Slow and unhurried. Natural pauses between sentences. Never rushed.\n"
+            "Accent: Clear, neutral.\n\n"
+            "## TRANSCRIPT\n"
+            f"{chunk}"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                            voice_name=voice_name,
+                        )
+                    )
+                ),
+            ),
+        )
+
+        pcm_data = response.candidates[0].content.parts[0].inline_data.data
+
+        # Gemini returns raw 24kHz 16-bit mono PCM — wrap in WAV so pydub can decode it
+        wav_buffer = BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)      # 16-bit
+            wf.setframerate(24000)
+            wf.writeframes(pcm_data)
+        wav_buffer.seek(0)
+        narration += AudioSegment.from_wav(wav_buffer)
+
+    # Ambient mixing
+    if ambient != "none":
+        ambient_file = _pick_ambient_file(ambient)
+        if ambient_file:
+            try:
+                amb_seg = AudioSegment.from_file(ambient_file)
+                loops_needed = math.ceil(len(narration) / len(amb_seg))
+                amb_looped = (amb_seg * loops_needed)[: len(narration)]
+                amb_quiet = amb_looped + ambient_db   # ambient_db is negative (e.g. -18)
+                narration = narration.overlay(amb_quiet)
+            except Exception as exc:
+                logger.warning("Ambient mixing failed (%s) — continuing narration-only: %s", ambient_file, exc)
+
+    narration.export(out_path, format="mp3", bitrate="128k")
+    return len(narration), len(chunks)
+
+
 # ── Request / response models ─────────────────────────────────────────────────
+
+class AudioRequest(BaseModel):
+    story_text: str = Field(..., min_length=100, description="The final story text to convert to audio")
+    voice: str = Field(
+        default="Aoede",
+        description='Gemini TTS voice name, e.g. "Aoede", "Sulafat", "Achernar", "Vindemiatrix"',
+    )
+    ambient: str = Field(
+        default="none",
+        description='Ambient sound: "fire", "rain", "ocean", "woods", or "none"',
+    )
+    ambient_db: float = Field(
+        default=-12.0,
+        ge=-40.0,
+        le=-6.0,
+        description="Ambient volume relative to narration in dB (negative = quieter)",
+    )
+
 
 class GenerateRequest(BaseModel):
     topic: str = Field(..., min_length=2, max_length=200, description="Story topic")
@@ -218,6 +371,56 @@ async def index(drop_old: bool = False) -> JSONResponse:
     except Exception as exc:
         logger.error("/index failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/generate-audio")
+async def generate_audio(request: AudioRequest) -> JSONResponse:
+    """Convert story text to audio via Gemini TTS, optionally mixed with ambient sound.
+
+    Long stories are split into sentence-boundary chunks (≤4000 chars each) and
+    synthesized in sequence, then concatenated with pydub. Audio is cached by content
+    hash — repeated calls for the same story return instantly without re-synthesizing.
+
+    Returns JSON: { audio_url, duration_seconds, chunks_synthesized, ambient_mixed }
+    """
+    # Stable filename from content hash — free deduplication
+    content_hash = hashlib.sha256(request.story_text.encode()).hexdigest()[:16]
+    audio_filename = f"{content_hash}.mp3"
+    audio_path = os.path.join(AUDIO_DIR, audio_filename)
+
+    if os.path.exists(audio_path):
+        from pydub import AudioSegment
+        duration_ms = len(AudioSegment.from_mp3(audio_path))
+        return JSONResponse(content={
+            "audio_url": f"/audio/{audio_filename}",
+            "duration_seconds": duration_ms // 1000,
+            "chunks_synthesized": 0,
+            "ambient_mixed": request.ambient,
+            "cached": True,
+        })
+
+    try:
+        loop = asyncio.get_event_loop()
+        duration_ms, chunks_synthesized = await loop.run_in_executor(
+            None,
+            _synthesize_blocking,
+            request.story_text,
+            request.voice,
+            request.ambient,
+            request.ambient_db,
+            audio_path,
+        )
+    except Exception as exc:
+        logger.error("/generate-audio failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return JSONResponse(content={
+        "audio_url": f"/audio/{audio_filename}",
+        "duration_seconds": duration_ms // 1000,
+        "chunks_synthesized": chunks_synthesized,
+        "ambient_mixed": request.ambient,
+        "cached": False,
+    })
 
 
 @app.post("/generate")

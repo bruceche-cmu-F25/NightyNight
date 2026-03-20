@@ -15,3 +15,6 @@ uvicorn[standard]>=0.27
 pydantic>=2.0
 sse-starlette>=2.0.0
 python-dotenv>=1.0.1
+google-cloud-texttospeech>=2.16.0
+pydub>=0.25.1
+audioop-lts>=0.2.1  # pydub compatibility shim for Python 3.13+ (audioop removed from stdlib)
