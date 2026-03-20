@@ -28,11 +28,27 @@ _SOUNDS_DIR = os.environ.get("SOUNDS_DIR", str(Path(__file__).resolve().parents[
 
 # One representative file per ambient category
 _AMBIENT_FILES: dict[str, str] = {
-    "fire":  "fire/fire01.mp3",
-    "rain":  "rain/Light rain recordings mixed settings-01.wav",
-    "ocean": "ocean/ocean01.mp3",
-    "woods": "woods/woods01.mp3",
+    "fire":   "fire/fire01.mp3",
+    "rain":   "rain/Light rain recordings mixed settings-01.wav",
+    "ocean":  "ocean/ocean01.mp3",
+    "woods":  "woods/woods01.mp3",
+    "cosmos": "cosmos/cosmos01.wav",
 }
+
+# rag_domain → ambient mapping used when ambient == "auto"
+_DOMAIN_AMBIENT: dict[str, str] = {
+    "cosmos":       "cosmos",
+    "life":         "woods",
+    "civilization": "fire",
+}
+_DEFAULT_AMBIENT = "rain"
+
+
+def _resolve_ambient(ambient: str, domain: str) -> str:
+    """Return resolved ambient name. If 'auto', pick from rag_domain; else use as-is."""
+    if ambient != "auto":
+        return ambient
+    return _DOMAIN_AMBIENT.get(domain.lower(), _DEFAULT_AMBIENT)
 
 load_dotenv()
 
@@ -98,6 +114,7 @@ app.add_middleware(
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/tmp/counting_stars_audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
+app.mount("/sounds", StaticFiles(directory=_SOUNDS_DIR), name="sounds")
 
 
 # ── TTS helpers ───────────────────────────────────────────────────────────────
@@ -136,6 +153,52 @@ def _pick_ambient_file(ambient: str) -> str | None:
     return str(path) if path.exists() else None
 
 
+_TTS_PROMPT_PREFIX = (
+    "# AUDIO PROFILE: Bedtime Science Narrator\n\n"
+    "## DIRECTOR'S NOTES\n"
+    "Style: Warm, calm, reassuring bedtime narrator — like David Attenborough reading a "
+    "bedtime story. Full, clear voice with a relaxed and soothing tone. "
+    "Do NOT whisper. Do NOT drop volume. Maintain a steady, full vocal presence throughout. "
+    "The listener is lying in bed drifting off — the voice should feel like a gentle, "
+    "trustworthy companion guiding them through the story.\n"
+    "Pacing: Slow and unhurried. Natural pauses between sentences. Never rushed.\n"
+    "Accent: Clear, neutral.\n\n"
+    "## TRANSCRIPT\n"
+)
+
+
+def _synthesize_chunk(idx: int, chunk: str, voice_name: str, api_key: str) -> tuple[int, "AudioSegment"]:
+    """Synthesize a single text chunk via Gemini TTS. Safe to call from threads."""
+    import wave
+    from google import genai
+    from google.genai import types
+    from pydub import AudioSegment
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-preview-tts",
+        contents=_TTS_PROMPT_PREFIX + chunk,
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+                )
+            ),
+        ),
+    )
+    pcm_data = response.candidates[0].content.parts[0].inline_data.data
+    wav_buffer = BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(pcm_data)
+    wav_buffer.seek(0)
+    from pydub import AudioSegment
+    return idx, AudioSegment.from_wav(wav_buffer)
+
+
 def _synthesize_blocking(
     story_text: str,
     voice_name: str,
@@ -145,62 +208,30 @@ def _synthesize_blocking(
 ) -> tuple[int, int]:
     """Synthesize story text via Gemini TTS, optionally mix ambient sound.
 
-    Returns (duration_ms, chunks_synthesized).
+    Chunks are synthesized in parallel via ThreadPoolExecutor, then reassembled
+    in order. Returns (duration_ms, chunks_synthesized).
     Runs synchronously — call via run_in_executor to avoid blocking the event loop.
     """
-    import wave
-    from google import genai
-    from google.genai import types
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pydub import AudioSegment
 
     api_key = os.environ.get("GOOGLE_API_KEY")
-    client = genai.Client(api_key=api_key)
-
-    # Gemini TTS has a 32k token limit — chunk conservatively for reliability
     chunks = _chunk_text(story_text, max_chars=4000)
-    narration = AudioSegment.empty()
+    logger.info("TTS: synthesizing %d chunks in parallel", len(chunks))
 
-    for chunk in chunks:
-        prompt = (
-            "# AUDIO PROFILE: Bedtime Science Narrator\n\n"
-            "## DIRECTOR'S NOTES\n"
-            "Style: Warm, calm, reassuring bedtime narrator — like David Attenborough reading a "
-            "bedtime story. Full, clear voice with a relaxed and soothing tone. "
-            "Do NOT whisper. Do NOT drop volume. Maintain a steady, full vocal presence throughout. "
-            "The listener is lying in bed drifting off — the voice should feel like a gentle, "
-            "trustworthy companion guiding them through the story.\n"
-            "Pacing: Slow and unhurried. Natural pauses between sentences. Never rushed.\n"
-            "Accent: Clear, neutral.\n\n"
-            "## TRANSCRIPT\n"
-            f"{chunk}"
-        )
+    results: dict[int, AudioSegment] = {}
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as pool:
+        futures = {
+            pool.submit(_synthesize_chunk, i, chunk, voice_name, api_key): i
+            for i, chunk in enumerate(chunks)
+        }
+        for future in as_completed(futures):
+            idx, seg = future.result()
+            results[idx] = seg
+            logger.info("TTS: chunk %d/%d done", idx + 1, len(chunks))
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                            voice_name=voice_name,
-                        )
-                    )
-                ),
-            ),
-        )
-
-        pcm_data = response.candidates[0].content.parts[0].inline_data.data
-
-        # Gemini returns raw 24kHz 16-bit mono PCM — wrap in WAV so pydub can decode it
-        wav_buffer = BytesIO()
-        with wave.open(wav_buffer, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)      # 16-bit
-            wf.setframerate(24000)
-            wf.writeframes(pcm_data)
-        wav_buffer.seek(0)
-        narration += AudioSegment.from_wav(wav_buffer)
+    # Reassemble in original order
+    narration = sum((results[i] for i in range(len(chunks))), AudioSegment.empty())
 
     # Ambient mixing
     if ambient != "none":
@@ -210,7 +241,7 @@ def _synthesize_blocking(
                 amb_seg = AudioSegment.from_file(ambient_file)
                 loops_needed = math.ceil(len(narration) / len(amb_seg))
                 amb_looped = (amb_seg * loops_needed)[: len(narration)]
-                amb_quiet = amb_looped + ambient_db   # ambient_db is negative (e.g. -18)
+                amb_quiet = amb_looped + ambient_db
                 narration = narration.overlay(amb_quiet)
             except Exception as exc:
                 logger.warning("Ambient mixing failed (%s) — continuing narration-only: %s", ambient_file, exc)
@@ -262,6 +293,13 @@ class GenerateRequest(BaseModel):
         max_length=100,
         description='Science domain, e.g. "cosmology", "biology", "history of science"',
     )
+    # TTS fields — server kicks off synthesis immediately after polish_story completes
+    voice: str = Field(default="Aoede", description="Gemini TTS voice name")
+    ambient: str = Field(
+        default="auto",
+        description='"auto" picks ambient by domain; or "fire","rain","ocean","woods","cosmos","none"',
+    )
+    ambient_db: float = Field(default=-12.0, ge=-40.0, le=-6.0)
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -291,6 +329,11 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
     stream_mode="updates" yields only the fields changed by each node, not the
     full state. We therefore maintain current_state ourselves, merging every
     update into it so we always have the complete picture when building events.
+
+    TTS synthesis is kicked off as a background executor task the moment
+    polish_story finishes (final text is ready then), so it runs in parallel
+    with the SSE delivery and Streamlit re-render rather than waiting for a
+    second client request.
     """
 
     initial_state: StoryState = {
@@ -304,6 +347,9 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
     # Seed current_state with the inputs; nodes will fill in the rest.
     current_state: dict = dict(initial_state)
 
+    synthesis_future = None
+    content_hash: str | None = None
+
     try:
         async for chunk in graph.astream(initial_state, stream_mode="updates"):
             for node_name, node_updates in chunk.items():
@@ -311,31 +357,59 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                 if isinstance(node_updates, dict):
                     current_state.update(node_updates)
 
+                # polish_story just finished — final_story is ready. Kick off TTS now
+                # so synthesis runs in parallel with SSE delivery + Streamlit re-render.
+                if node_name == "polish_story" and synthesis_future is None:
+                    polished = current_state.get("final_story")
+                    if polished:
+                        resolved_ambient = _resolve_ambient(request.ambient, request.domain)
+                        content_hash = hashlib.sha256(polished.encode()).hexdigest()[:16]
+                        audio_out = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
+                        if not os.path.exists(audio_out):
+                            loop = asyncio.get_event_loop()
+                            synthesis_future = loop.run_in_executor(
+                                None, _synthesize_blocking,
+                                polished, request.voice, resolved_ambient,
+                                request.ambient_db, audio_out,
+                            )
+                            logger.info("TTS synthesis started in background (parallel chunks).")
+                        else:
+                            logger.info("TTS cache hit — skipping synthesis.")
+
                 if node_name not in _PROGRESS_NODES:
                     continue
 
                 # Convert 0-based index to 1-based for the frontend.
-                # Note: after advance_chapter runs, the index already points to
-                # the NEXT chapter — so treat `chapter` as supplementary context
-                # only. The status_message (set by the graph) is the authoritative
-                # human-readable description of what just happened.
                 chapter_idx = current_state.get("current_chapter_index")
                 chapter_num = chapter_idx + 1 if isinstance(chapter_idx, int) else None
 
                 yield _sse({
                     "event": "node_done",
                     "node": node_name,
-                    "chapter": chapter_num,          # 1-based, may lag by 1 after advance_chapter
-                    "message": current_state.get("status_message", ""),   # primary field
+                    "chapter": chapter_num,
+                    "message": current_state.get("status_message", ""),
                     "forced_chapters": current_state.get("forced_chapters", []),
                 })
 
-        # Final event — current_state now holds the fully accumulated graph output
+        # Graph complete — await TTS (may already be done by now)
         final_story = current_state.get("final_story")
+        audio_url: str | None = None
+
+        if synthesis_future is not None:
+            try:
+                await synthesis_future
+                audio_url = f"/audio/{content_hash}.mp3"
+                logger.info("TTS synthesis complete.")
+            except Exception as exc:
+                logger.error("Background TTS synthesis failed: %s", exc)
+        elif content_hash and os.path.exists(os.path.join(AUDIO_DIR, f"{content_hash}.mp3")):
+            audio_url = f"/audio/{content_hash}.mp3"
+
         if final_story:
             yield _sse({
                 "event": "done",
                 "final_story": final_story,
+                "audio_url": audio_url,
                 "forced_chapters": current_state.get("forced_chapters", []),
                 "status_message": current_state.get("status_message", ""),
             })

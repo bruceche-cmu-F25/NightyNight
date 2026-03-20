@@ -29,6 +29,33 @@ if "audio_url" not in st.session_state:
 if "audio_info" not in st.session_state:
     st.session_state.audio_info = {}
 
+# ── Ambient preview helpers ────────────────────────────────────────────────────
+
+_AMBIENT_PREVIEW_PATHS: dict[str, str] = {
+    "fire":   "sounds/fire/fire01.mp3",
+    "rain":   "sounds/rain/Light rain recordings mixed settings-01.wav",
+    "ocean":  "sounds/ocean/ocean01.mp3",
+    "woods":  "sounds/woods/woods01.mp3",
+    "cosmos": "sounds/cosmos/cosmos01.wav",
+}
+
+_COSMOS_WORDS  = {"universe", "cosmos", "space", "galaxy", "star", "big bang", "astronomy",
+                   "cosmic", "planet", "black hole", "nebula", "supernova", "quasar", "dark matter"}
+_LIFE_WORDS    = {"biology", "evolution", "life", "species", "animal", "plant", "tree",
+                   "forest", "creature", "dna", "cell", "nature", "ecosystem", "dinosaur"}
+_HISTORY_WORDS = {"history", "civilization", "ancient", "rome", "egypt", "dynasty", "war",
+                   "culture", "empire", "greek", "human", "society", "archaeology", "medieval"}
+
+def _infer_ambient(topic: str) -> str:
+    t = topic.lower()
+    if any(w in t for w in _COSMOS_WORDS):
+        return "cosmos"
+    if any(w in t for w in _HISTORY_WORDS):
+        return "fire"
+    if any(w in t for w in _LIFE_WORDS):
+        return "woods"
+    return "rain"
+
 # ── Input form ────────────────────────────────────────────────────────────────
 
 with st.form("generate_form"):
@@ -58,8 +85,9 @@ with st.form("generate_form"):
     with col3:
         ambient_choice = st.selectbox(
             "Ambient sound",
-            ["fire", "rain", "ocean", "woods", "none"],
+            ["auto", "fire", "rain", "ocean", "woods", "cosmos", "none"],
             index=0,
+            help='"auto" picks by story domain',
         )
     with col4:
         voice_choice = st.selectbox(
@@ -84,6 +112,22 @@ if submitted:
     st.session_state.audio_info = {}
     st.session_state.topic = topic.strip()
 
+    # Play ambient immediately based on topic — sets the mood while the story generates
+    preview_ambient = _infer_ambient(topic)
+    preview_path = _AMBIENT_PREVIEW_PATHS[preview_ambient]
+    preview_url = f"{API_BASE}/{preview_path}"
+    st.components.v1.html(
+        f"""
+        <audio autoplay loop style="display:none">
+            <source src="{preview_url}">
+        </audio>
+        <script>
+            document.querySelector('audio').volume = 0.3;
+        </script>
+        """,
+        height=0,
+    )
+
     status_box    = st.empty()
     progress_bar  = st.progress(0)
     warning_box   = st.empty()
@@ -105,6 +149,8 @@ if submitted:
         "style": style,
         "audience": audience,
         "domain": "general science",
+        "voice": voice_choice,
+        "ambient": ambient_choice,
     }
 
     final_story = None
@@ -155,8 +201,12 @@ if submitted:
                 elif event == "done":
                     final_story     = data.get("final_story", "")
                     forced_chapters = data.get("forced_chapters", [])
+                    server_audio_url = data.get("audio_url")  # pre-synthesized by server
                     progress_bar.progress(100)
-                    status_box.success("Story ready — generating audio...")
+                    if server_audio_url:
+                        status_box.success("Story and audio ready!")
+                    else:
+                        status_box.success("Story ready — generating audio...")
 
                 elif event == "error":
                     progress_bar.empty()
@@ -181,28 +231,34 @@ if submitted:
     st.session_state.final_story = final_story
     st.session_state.forced_chapters = forced_chapters
 
-    # ── Auto-generate audio immediately after story ───────────────────────────
+    # ── Audio: use server-pre-synthesized URL or fall back to explicit POST ──────
 
     story_placeholder.markdown(final_story)
 
-    with st.spinner("Synthesizing narration..."):
-        try:
-            audio_resp = requests.post(
-                f"{API_BASE}/generate-audio",
-                json={
-                    "story_text": final_story,
-                    "ambient": ambient_choice,
-                    "voice": voice_choice,
-                },
-                timeout=600,
-            )
-            audio_resp.raise_for_status()
-            audio_data = audio_resp.json()
-            st.session_state.audio_url  = f"{API_BASE}{audio_data['audio_url']}"
-            st.session_state.audio_info = audio_data
-            status_box.success("Ready.")
-        except Exception as e:
-            status_box.warning(f"Audio generation failed: {e}")
+    if server_audio_url:
+        # Server already synthesized audio in parallel with the done SSE — no extra wait
+        st.session_state.audio_url  = f"{API_BASE}{server_audio_url}"
+        st.session_state.audio_info = {"audio_url": server_audio_url, "ambient_mixed": ambient_choice}
+        status_box.success("Ready.")
+    else:
+        with st.spinner("Synthesizing narration..."):
+            try:
+                audio_resp = requests.post(
+                    f"{API_BASE}/generate-audio",
+                    json={
+                        "story_text": final_story,
+                        "ambient": ambient_choice,
+                        "voice": voice_choice,
+                    },
+                    timeout=600,
+                )
+                audio_resp.raise_for_status()
+                audio_data = audio_resp.json()
+                st.session_state.audio_url  = f"{API_BASE}{audio_data['audio_url']}"
+                st.session_state.audio_info = audio_data
+                status_box.success("Ready.")
+            except Exception as e:
+                status_box.warning(f"Audio generation failed: {e}")
 
 # ── Display persisted result ──────────────────────────────────────────────────
 
