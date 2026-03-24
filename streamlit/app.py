@@ -92,9 +92,10 @@ with st.form("generate_form"):
     with col4:
         voice_choice = st.selectbox(
             "Voice",
-            ["Aoede", "Sulafat", "Achernar", "Vindemiatrix", "Umbriel", "Kore", "Charon"],
+            ["en-US-Neural2-C", "en-US-Neural2-D", "en-US-Neural2-F", "en-US-Neural2-J",
+             "en-US-Wavenet-C", "en-US-Wavenet-D"],
             index=0,
-            help="Aoede=Breezy · Sulafat=Warm · Achernar=Soft · Vindemiatrix=Gentle · Umbriel=Easy-going",
+            help="Neural2-C=Warm female · Neural2-D=Calm male · Neural2-F=Soft female · Neural2-J=Deep male",
         )
 
     submitted = st.form_submit_button("Generate story + audio", type="primary", use_container_width=True)

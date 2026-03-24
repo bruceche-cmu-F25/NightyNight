@@ -5,7 +5,6 @@ import logging
 import math
 import os
 import re
-from io import BytesIO
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -119,29 +118,82 @@ app.mount("/sounds", StaticFiles(directory=_SOUNDS_DIR), name="sounds")
 
 # ── TTS helpers ───────────────────────────────────────────────────────────────
 
-def _chunk_text(text: str, max_chars: int = 4500) -> list[str]:
-    """Split text on sentence boundaries so no chunk exceeds max_chars bytes."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-    chunks: list[str] = []
-    current = ""
-    for sentence in sentences:
-        # Hard-split a single sentence that is itself too long
-        if len(sentence) > max_chars:
-            if current:
-                chunks.append(current.strip())
-                current = ""
-            for i in range(0, len(sentence), max_chars):
-                chunks.append(sentence[i : i + max_chars])
+def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
+    """Split text into (chunk, is_chapter_boundary) tuples.
+
+    Strategy:
+      1. Split on chapter/section headings first — these are natural hard breaks.
+      2. Within each section, split on blank-line paragraph boundaries.
+      3. Only sentence-split a paragraph that exceeds max_chars.
+
+    Returns a list of (text_chunk, is_chapter_boundary) where is_chapter_boundary=True
+    marks the *start* of a new chapter (used to insert longer silence before it).
+    """
+    # Detect chapter headings: lines that start with #, or ALL-CAPS titles, etc.
+    _HEADING_RE = re.compile(r'^\s*(#{1,3}\s+.+|[A-Z][A-Z\s\d:,\-]{10,})\s*$', re.MULTILINE)
+
+    def _sentences(para: str) -> list[str]:
+        """Split a paragraph into sentences as a fallback for long paragraphs."""
+        sents = re.split(r'(?<=[.!?。！？])\s+', para)
+        chunks: list[str] = []
+        cur = ""
+        for s in sents:
+            if len(s) > max_chars:
+                if cur:
+                    chunks.append(cur.strip())
+                    cur = ""
+                for i in range(0, len(s), max_chars):
+                    chunks.append(s[i : i + max_chars])
+                continue
+            if len(cur) + len(s) + 1 > max_chars:
+                if cur:
+                    chunks.append(cur.strip())
+                cur = s
+            else:
+                cur += (" " if cur else "") + s
+        if cur:
+            chunks.append(cur.strip())
+        return [c for c in chunks if c]
+
+    # Split into sections on heading boundaries
+    sections: list[tuple[str, bool]] = []  # (text, is_chapter_start)
+    last_end = 0
+    is_first = True
+    for m in _HEADING_RE.finditer(text):
+        preceding = text[last_end : m.start()].strip()
+        if preceding:
+            sections.append((preceding, False))
+        heading = m.group(0).strip()
+        # Combine heading with the text that follows until next heading
+        # (we'll handle that below)
+        sections.append((heading, not is_first))
+        is_first = False
+        last_end = m.end()
+    tail = text[last_end:].strip()
+    if tail:
+        sections.append((tail, False))
+
+    if not sections:
+        sections = [(text, False)]
+
+    result: list[tuple[str, bool]] = []
+    for section_text, is_chapter in sections:
+        # Split section into paragraphs
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', section_text) if p.strip()]
+        if not paragraphs:
             continue
-        if len(current) + len(sentence) + 1 > max_chars:
-            if current:
-                chunks.append(current.strip())
-            current = sentence
-        else:
-            current += (" " if current else "") + sentence
-    if current:
-        chunks.append(current.strip())
-    return [c for c in chunks if c]
+        first_para = True
+        for para in paragraphs:
+            mark_chapter = is_chapter and first_para
+            first_para = False
+            if len(para) <= max_chars:
+                result.append((para, mark_chapter))
+            else:
+                # Sentence-level fallback
+                sents = _sentences(para)
+                for j, s in enumerate(sents):
+                    result.append((s, mark_chapter and j == 0))
+    return [(c, b) for c, b in result if c]
 
 
 def _pick_ambient_file(ambient: str) -> str | None:
@@ -153,50 +205,77 @@ def _pick_ambient_file(ambient: str) -> str | None:
     return str(path) if path.exists() else None
 
 
-_TTS_PROMPT_PREFIX = (
-    "# AUDIO PROFILE: Bedtime Science Narrator\n\n"
-    "## DIRECTOR'S NOTES\n"
-    "Style: Warm, calm, reassuring bedtime narrator — like David Attenborough reading a "
-    "bedtime story. Full, clear voice with a relaxed and soothing tone. "
-    "Do NOT whisper. Do NOT drop volume. Maintain a steady, full vocal presence throughout. "
-    "The listener is lying in bed drifting off — the voice should feel like a gentle, "
-    "trustworthy companion guiding them through the story.\n"
-    "Pacing: Slow and unhurried. Natural pauses between sentences. Never rushed.\n"
-    "Accent: Clear, neutral.\n\n"
-    "## TRANSCRIPT\n"
-)
+_TTS_REST_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+
+
+def _text_to_ssml(text: str) -> str:
+    """Convert plain narration text to SSML for richer, more natural delivery.
+
+    What this adds over plain text:
+    - <prosody> wrapper: slower pace (87%) + slightly lower pitch (-1st) applied
+      at the model level, not post-processing — sounds more natural than audioConfig rate.
+    - <break> between paragraphs: 450 ms pause gives the listener a moment to absorb
+      each idea — essential for bedtime science narration.
+    - <break> after sentence-ending punctuation at paragraph boundaries: mimics the
+      breath a human narrator takes between thoughts.
+    - HTML entity escaping: prevents malformed SSML from special characters in story text.
+    """
+    import html
+
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text.strip()]
+
+    parts = []
+    for i, para in enumerate(paragraphs):
+        if i > 0:
+            parts.append('<break time="450ms"/>')
+        parts.append(f"<p>{html.escape(para)}</p>")
+
+    inner = "\n".join(parts)
+    return f'<speak><prosody rate="87%" pitch="-1st">{inner}</prosody></speak>'
 
 
 def _synthesize_chunk(idx: int, chunk: str, voice_name: str, api_key: str) -> tuple[int, "AudioSegment"]:
-    """Synthesize a single text chunk via Gemini TTS. Safe to call from threads."""
-    import wave
-    from google import genai
-    from google.genai import types
+    """Synthesize a single text chunk via Google Cloud TTS REST API using SSML.
+
+    Uses SSML input instead of plain text for natural pacing and paragraph breathing.
+    The REST endpoint accepts API keys via ?key= — no service account needed.
+
+    Recommended voices (Neural2 — no extra model spec required):
+      Female: "en-US-Neural2-C"  |  Male: "en-US-Neural2-D"
+      Softer female: "en-US-Neural2-F"  |  Deeper male: "en-US-Neural2-J"
+    """
+    import base64
+    from io import BytesIO
+
+    import requests
     from pydub import AudioSegment
 
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-tts",
-        contents=_TTS_PROMPT_PREFIX + chunk,
-        config=types.GenerateContentConfig(
-            response_modalities=["AUDIO"],
-            speech_config=types.SpeechConfig(
-                voice_config=types.VoiceConfig(
-                    prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
-                )
-            ),
-        ),
+    payload = {
+        "input": {"ssml": _text_to_ssml(chunk)},
+        "voice": {"languageCode": "en-US", "name": voice_name},
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "effectsProfileId": ["headphone-class-device"],
+        },
+    }
+
+    resp = requests.post(
+        _TTS_REST_URL,
+        params={"key": api_key},
+        json=payload,
+        timeout=30,
     )
-    pcm_data = response.candidates[0].content.parts[0].inline_data.data
-    wav_buffer = BytesIO()
-    with wave.open(wav_buffer, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(24000)
-        wf.writeframes(pcm_data)
-    wav_buffer.seek(0)
-    from pydub import AudioSegment
-    return idx, AudioSegment.from_wav(wav_buffer)
+
+    if not resp.ok:
+        raise RuntimeError(
+            f"Cloud TTS REST error {resp.status_code}: {resp.text[:400]}"
+        )
+
+    audio_bytes = base64.b64decode(resp.json()["audioContent"])
+    audio_seg = AudioSegment.from_mp3(BytesIO(audio_bytes))
+    return idx, audio_seg
 
 
 def _synthesize_blocking(
@@ -216,22 +295,38 @@ def _synthesize_blocking(
     from pydub import AudioSegment
 
     api_key = os.environ.get("GOOGLE_API_KEY")
-    chunks = _chunk_text(story_text, max_chars=4000)
-    logger.info("TTS: synthesizing %d chunks in parallel", len(chunks))
+    chunk_tuples = _chunk_text(story_text, max_chars=4000)
+    logger.info("TTS: synthesizing %d chunks in parallel", len(chunk_tuples))
 
+    # Synthesize all chunks in parallel; each item is (text, is_chapter_boundary)
     results: dict[int, AudioSegment] = {}
-    with ThreadPoolExecutor(max_workers=min(len(chunks), 4)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(chunk_tuples), 2)) as pool:
         futures = {
-            pool.submit(_synthesize_chunk, i, chunk, voice_name, api_key): i
-            for i, chunk in enumerate(chunks)
+            pool.submit(_synthesize_chunk, i, text, voice_name, api_key): i
+            for i, (text, _) in enumerate(chunk_tuples)
         }
         for future in as_completed(futures):
             idx, seg = future.result()
             results[idx] = seg
-            logger.info("TTS: chunk %d/%d done", idx + 1, len(chunks))
+            logger.info("TTS: chunk %d/%d done", idx + 1, len(chunk_tuples))
 
-    # Reassemble in original order
-    narration = sum((results[i] for i in range(len(chunks))), AudioSegment.empty())
+    # Reassemble in order with crossfade between paragraphs and longer pause at chapters
+    _CROSSFADE_MS      = 80    # smooth join between adjacent paragraph chunks
+    _CHAPTER_PAUSE_MS  = 600   # extra breath between chapters
+
+    narration = AudioSegment.empty()
+    for i in range(len(chunk_tuples)):
+        seg = results[i]
+        _, is_chapter = chunk_tuples[i]
+        if len(narration) == 0:
+            narration = seg
+        elif is_chapter:
+            # Chapter boundary: fade out tail, add silence, fade in new segment
+            silence = AudioSegment.silent(duration=_CHAPTER_PAUSE_MS, frame_rate=24000)
+            narration = narration.append(silence, crossfade=_CROSSFADE_MS)
+            narration = narration.append(seg, crossfade=_CROSSFADE_MS)
+        else:
+            narration = narration.append(seg, crossfade=_CROSSFADE_MS)
 
     # Ambient mixing
     if ambient != "none":
@@ -246,8 +341,8 @@ def _synthesize_blocking(
             except Exception as exc:
                 logger.warning("Ambient mixing failed (%s) — continuing narration-only: %s", ambient_file, exc)
 
-    narration.export(out_path, format="mp3", bitrate="128k")
-    return len(narration), len(chunks)
+    narration.export(out_path, format="mp3", bitrate="192k")
+    return len(narration), len(chunk_tuples)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -255,8 +350,12 @@ def _synthesize_blocking(
 class AudioRequest(BaseModel):
     story_text: str = Field(..., min_length=100, description="The final story text to convert to audio")
     voice: str = Field(
-        default="Aoede",
-        description='Gemini TTS voice name, e.g. "Aoede", "Sulafat", "Achernar", "Vindemiatrix"',
+        default="en-US-Neural2-C",
+        description=(
+            "Google Cloud TTS voice (Neural2 recommended). "
+            "Female: 'en-US-Neural2-C'. Male: 'en-US-Neural2-D'. "
+            "Lighter female: 'en-US-Neural2-F'. Deeper male: 'en-US-Neural2-J'."
+        ),
     )
     ambient: str = Field(
         default="none",
@@ -294,7 +393,14 @@ class GenerateRequest(BaseModel):
         description='Science domain, e.g. "cosmology", "biology", "history of science"',
     )
     # TTS fields — server kicks off synthesis immediately after polish_story completes
-    voice: str = Field(default="Aoede", description="Gemini TTS voice name")
+    voice: str = Field(
+        default="en-US-Neural2-C",
+        description=(
+            "Google Cloud TTS voice (Neural2 recommended). "
+            "Female: 'en-US-Neural2-C'. Male: 'en-US-Neural2-D'. "
+            "Lighter female: 'en-US-Neural2-F'. Deeper male: 'en-US-Neural2-J'."
+        ),
+    )
     ambient: str = Field(
         default="auto",
         description='"auto" picks ambient by domain; or "fire","rain","ocean","woods","cosmos","none"',
