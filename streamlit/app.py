@@ -90,13 +90,23 @@ with st.form("generate_form"):
             help='"auto" picks by story domain',
         )
     with col4:
-        voice_choice = st.selectbox(
+        _VOICE_OPTIONS = {
+            # User's own voices
+            "True Crime & Horror Narrator":          "tZssYepgGaQmegsMEXjK",
+            "Kyle Manning":                          "q8hD3YAFEqLvfbspywun",
+            "Archer (deep, steady, relaxing)":       "X0K9Z1Bor9SpbE1wSaoe",
+            "Adam Stone (smooth, deep, relaxed)":    "NFG5qt843uXKj4pFvR7C",
+            "Christopher (gentle, trustworthy)":     "G17SuINrv2H9FC6nvetn",
+            "John Doe (deep)":                       "EiNlNiXeDU1pqqOPrYMO",
+            "Autumn Veil (warm, reflective female)": "KoVIHoyLDrQyd4pGalbs",
+        }
+        voice_label = st.selectbox(
             "Voice",
-            ["en-US-Neural2-C", "en-US-Neural2-D", "en-US-Neural2-F", "en-US-Neural2-J",
-             "en-US-Wavenet-C", "en-US-Wavenet-D"],
-            index=0,
-            help="Neural2-C=Warm female · Neural2-D=Calm male · Neural2-F=Soft female · Neural2-J=Deep male",
+            list(_VOICE_OPTIONS.keys()),
+            index=4,  # Christopher — gentle, trustworthy, good default for bedtime
+            help="Christopher or Archer work well for bedtime science; Autumn Veil for a warm female narrator",
         )
+        voice_choice = _VOICE_OPTIONS[voice_label]
 
     submitted = st.form_submit_button("Generate story + audio", type="primary", use_container_width=True)
 
@@ -113,21 +123,29 @@ if submitted:
     st.session_state.audio_info = {}
     st.session_state.topic = topic.strip()
 
-    # Play ambient immediately based on topic — sets the mood while the story generates
-    preview_ambient = _infer_ambient(topic)
-    preview_path = _AMBIENT_PREVIEW_PATHS[preview_ambient]
-    preview_url = f"{API_BASE}/{preview_path}"
-    st.components.v1.html(
-        f"""
-        <audio autoplay loop style="display:none">
-            <source src="{preview_url}">
-        </audio>
-        <script>
-            document.querySelector('audio').volume = 0.3;
-        </script>
-        """,
-        height=0,
-    )
+    # Play ambient immediately while story generates.
+    # Use the user's explicit choice so the preview matches the final mixed audio.
+    # If "auto", infer from topic. If "none", skip preview entirely.
+    if ambient_choice == "none":
+        preview_ambient = None
+    elif ambient_choice == "auto":
+        preview_ambient = _infer_ambient(topic)
+    else:
+        preview_ambient = ambient_choice
+
+    if preview_ambient and preview_ambient in _AMBIENT_PREVIEW_PATHS:
+        preview_url = f"{API_BASE}/{_AMBIENT_PREVIEW_PATHS[preview_ambient]}"
+        st.components.v1.html(
+            f"""
+            <audio id="cs-ambient-preview" autoplay loop style="display:none">
+                <source src="{preview_url}">
+            </audio>
+            <script>
+                document.getElementById('cs-ambient-preview').volume = 0.3;
+            </script>
+            """,
+            height=0,
+        )
 
     status_box    = st.empty()
     progress_bar  = st.progress(0)
@@ -235,6 +253,12 @@ if submitted:
     # ── Audio: use server-pre-synthesized URL or fall back to explicit POST ──────
 
     story_placeholder.markdown(final_story)
+
+    # Stop the ambient preview that was playing during generation
+    st.components.v1.html(
+        "<script>var a=document.getElementById('cs-ambient-preview');if(a){a.pause();a.currentTime=0;}</script>",
+        height=0,
+    )
 
     if server_audio_url:
         # Server already synthesized audio in parallel with the done SSE — no extra wait

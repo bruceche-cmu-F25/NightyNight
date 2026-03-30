@@ -197,12 +197,17 @@ def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
 
 
 def _pick_ambient_file(ambient: str) -> str | None:
-    """Return the absolute path to the ambient file, or None if not found."""
-    relative = _AMBIENT_FILES.get(ambient)
-    if not relative:
+    """Return a random audio file from the ambient subfolder, or None if not found."""
+    import random
+
+    subfolder = Path(_SOUNDS_DIR) / ambient
+    if not subfolder.is_dir():
         return None
-    path = Path(_SOUNDS_DIR) / relative
-    return str(path) if path.exists() else None
+    files = [
+        f for f in subfolder.iterdir()
+        if f.suffix.lower() in (".mp3", ".wav", ".ogg", ".flac")
+    ]
+    return str(random.choice(files)) if files else None
 
 
 _ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -252,6 +257,7 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str) -> tupl
             "similarity_boost": 0.80,
             "style": 0.05,
             "use_speaker_boost": True,
+            "speed": 0.82,   # ~18% slower — more breathing room for bedtime listening
         },
     }
 
