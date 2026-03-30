@@ -205,76 +205,70 @@ def _pick_ambient_file(ambient: str) -> str | None:
     return str(path) if path.exists() else None
 
 
-_TTS_REST_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+_ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+
+# Curated ElevenLabs voices for bedtime narration.
+# Keys are the friendly names shown in the UI; values are stable voice IDs.
+ELEVENLABS_VOICES: dict[str, str] = {
+    # ── User's own voices (work on free plan) ────────────────────────────────
+    "True Crime & Horror Narrator":          "tZssYepgGaQmegsMEXjK",
+    "Kyle Manning":                          "q8hD3YAFEqLvfbspywun",
+    "Archer (deep, steady, relaxing)":       "X0K9Z1Bor9SpbE1wSaoe",
+    "Adam Stone (smooth, deep, relaxed)":    "NFG5qt843uXKj4pFvR7C",
+    "Christopher (gentle, trustworthy)":     "G17SuINrv2H9FC6nvetn",
+    "John Doe (deep)":                       "EiNlNiXeDU1pqqOPrYMO",
+    "Autumn Veil (warm, reflective female)": "KoVIHoyLDrQyd4pGalbs",
+    # ── ElevenLabs library voices (require paid plan) ────────────────────────
+    "Rachel (warm female)":                  "21m00Tcm4TlvDq8ikWAM",
+    "Aria (calm female)":                    "9BWtsMINqrJLrRacOk9x",
+    "Adam (deep male)":                      "pNInz6obpgDQGcFmaJgB",
+    "Eric (calm male)":                      "cjVigY5qzO86Huf0OWal",
+    "Charlotte (soft female)":               "XB0fDUnXU5powFXDhCwa",
+    "Daniel (narrative male)":               "onwK4e9ZLuTAKqWW03F9",
+}
 
 
-def _text_to_ssml(text: str) -> str:
-    """Convert plain narration text to SSML for richer, more natural delivery.
+def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str) -> tuple[int, "AudioSegment"]:
+    """Synthesize a single text chunk via ElevenLabs TTS.
 
-    What this adds over plain text:
-    - <prosody> wrapper: slower pace (87%) + slightly lower pitch (-1st) applied
-      at the model level, not post-processing — sounds more natural than audioConfig rate.
-    - <break> between paragraphs: 450 ms pause gives the listener a moment to absorb
-      each idea — essential for bedtime science narration.
-    - <break> after sentence-ending punctuation at paragraph boundaries: mimics the
-      breath a human narrator takes between thoughts.
-    - HTML entity escaping: prevents malformed SSML from special characters in story text.
+    ElevenLabs produces highly natural, emotionally consistent narration — well-suited
+    for long-form bedtime content. Voice settings tuned for calm, unhurried narration:
+      stability=0.75  → consistent tone without sounding robotic
+      similarity_boost=0.80  → stays close to the reference voice character
+      style=0.05      → minimal expressiveness exaggeration (calm, not dramatic)
+      use_speaker_boost=True  → cleaner, more present vocal sound
     """
-    import html
-
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
-    if not paragraphs:
-        paragraphs = [text.strip()]
-
-    parts = []
-    for i, para in enumerate(paragraphs):
-        if i > 0:
-            parts.append('<break time="450ms"/>')
-        parts.append(f"<p>{html.escape(para)}</p>")
-
-    inner = "\n".join(parts)
-    return f'<speak><prosody rate="87%" pitch="-1st">{inner}</prosody></speak>'
-
-
-def _synthesize_chunk(idx: int, chunk: str, voice_name: str, api_key: str) -> tuple[int, "AudioSegment"]:
-    """Synthesize a single text chunk via Google Cloud TTS REST API using SSML.
-
-    Uses SSML input instead of plain text for natural pacing and paragraph breathing.
-    The REST endpoint accepts API keys via ?key= — no service account needed.
-
-    Recommended voices (Neural2 — no extra model spec required):
-      Female: "en-US-Neural2-C"  |  Male: "en-US-Neural2-D"
-      Softer female: "en-US-Neural2-F"  |  Deeper male: "en-US-Neural2-J"
-    """
-    import base64
     from io import BytesIO
 
     import requests
     from pydub import AudioSegment
 
+    url = _ELEVENLABS_TTS_URL.format(voice_id=voice_id)
     payload = {
-        "input": {"ssml": _text_to_ssml(chunk)},
-        "voice": {"languageCode": "en-US", "name": voice_name},
-        "audioConfig": {
-            "audioEncoding": "MP3",
-            "effectsProfileId": ["headphone-class-device"],
+        "text": chunk,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {
+            "stability": 0.75,
+            "similarity_boost": 0.80,
+            "style": 0.05,
+            "use_speaker_boost": True,
         },
     }
 
     resp = requests.post(
-        _TTS_REST_URL,
-        params={"key": api_key},
+        url,
+        headers={"xi-api-key": api_key, "Content-Type": "application/json"},
         json=payload,
-        timeout=30,
+        params={"output_format": "mp3_44100_128"},
+        timeout=60,
     )
 
     if not resp.ok:
         raise RuntimeError(
-            f"Cloud TTS REST error {resp.status_code}: {resp.text[:400]}"
+            f"ElevenLabs TTS error {resp.status_code}: {resp.text[:400]}"
         )
 
-    audio_bytes = base64.b64decode(resp.json()["audioContent"])
-    audio_seg = AudioSegment.from_mp3(BytesIO(audio_bytes))
+    audio_seg = AudioSegment.from_mp3(BytesIO(resp.content))
     return idx, audio_seg
 
 
@@ -294,7 +288,7 @@ def _synthesize_blocking(
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pydub import AudioSegment
 
-    api_key = os.environ.get("GOOGLE_API_KEY")
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
     chunk_tuples = _chunk_text(story_text, max_chars=4000)
     logger.info("TTS: synthesizing %d chunks in parallel", len(chunk_tuples))
 
@@ -350,11 +344,12 @@ def _synthesize_blocking(
 class AudioRequest(BaseModel):
     story_text: str = Field(..., min_length=100, description="The final story text to convert to audio")
     voice: str = Field(
-        default="en-US-Neural2-C",
+        default="21m00Tcm4TlvDq8ikWAM",
         description=(
-            "Google Cloud TTS voice (Neural2 recommended). "
-            "Female: 'en-US-Neural2-C'. Male: 'en-US-Neural2-D'. "
-            "Lighter female: 'en-US-Neural2-F'. Deeper male: 'en-US-Neural2-J'."
+            "ElevenLabs voice ID. "
+            "Rachel (warm female): '21m00Tcm4TlvDq8ikWAM'. "
+            "Adam (deep male): 'pNInz6obpgDQGcFmaJgB'. "
+            "Daniel (narrative male): 'onwK4e9ZLuTAKqWW03F9'."
         ),
     )
     ambient: str = Field(
@@ -394,11 +389,12 @@ class GenerateRequest(BaseModel):
     )
     # TTS fields — server kicks off synthesis immediately after polish_story completes
     voice: str = Field(
-        default="en-US-Neural2-C",
+        default="21m00Tcm4TlvDq8ikWAM",
         description=(
-            "Google Cloud TTS voice (Neural2 recommended). "
-            "Female: 'en-US-Neural2-C'. Male: 'en-US-Neural2-D'. "
-            "Lighter female: 'en-US-Neural2-F'. Deeper male: 'en-US-Neural2-J'."
+            "ElevenLabs voice ID. "
+            "Rachel (warm female): '21m00Tcm4TlvDq8ikWAM'. "
+            "Adam (deep male): 'pNInz6obpgDQGcFmaJgB'. "
+            "Daniel (narrative male): 'onwK4e9ZLuTAKqWW03F9'."
         ),
     )
     ambient: str = Field(
