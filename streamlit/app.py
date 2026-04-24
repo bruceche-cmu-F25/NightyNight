@@ -9,11 +9,11 @@ API_BASE = os.environ.get("API_BASE", "http://localhost:8000")
 # ── Page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="CountingStars",
+    page_title="NightyNight",
     layout="centered",
 )
 
-st.title("CountingStars")
+st.title("NightyNight🌙✨")
 st.caption("A bedtime science story, made just for tonight.")
 
 # ── Session state init ────────────────────────────────────────────────────────

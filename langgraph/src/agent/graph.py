@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,8 +22,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── RAG / Milvus Config ───────────────────────────────────────────────────────
-
-_MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
+_MILVUS_URI = os.getenv("MILVUS_URI", "http://34.67.37.109:19530")
+# _MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 _MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
 _MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "science_knowledge")
 _MILVUS_INDEX = os.getenv("INDEX_TYPE", "HNSW").upper()
@@ -686,13 +687,12 @@ def plan_story(state: StoryState) -> dict:
     logger.info("=" * 60)
     logger.info("[plan_story] topic='%s' domain='%s' duration=%dmin",
                 state["topic"], state["domain"], state["duration_min"])
-    rag_domain = _classify_rag_domain(state["topic"])
     num_chapters, target_total_words, words_per_chapter = derive_story_params(
         state["duration_min"]
     )
 
     chain = PromptTemplate.from_template(PLAN_PROMPT) | generation_llm | parser
-    raw = chain.invoke({
+    plan_inputs = {
         "topic": state["topic"],
         "domain": state["domain"],
         "audience": state["audience"],
@@ -701,7 +701,14 @@ def plan_story(state: StoryState) -> dict:
         "num_chapters": num_chapters,
         "target_total_words": target_total_words,
         "words_per_chapter": words_per_chapter,
-    }).strip()
+    }
+
+    # Domain classification and chapter planning are independent — run in parallel
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        domain_future = pool.submit(_classify_rag_domain, state["topic"])
+        plan_future = pool.submit(chain.invoke, plan_inputs)
+        rag_domain = domain_future.result()
+        raw = plan_future.result().strip()
 
     # Strip markdown code fences if the model wraps the JSON anyway
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
@@ -789,18 +796,16 @@ def verify_facts(state: StoryState) -> dict:
 
     logger.info("[verify_facts] ch%d — extracted %d facts: %s", idx + 1, len(facts), facts)
 
-    # Step 2: for each fact, retrieve evidence and judge
-    results: List[FactVerification] = []
+    # Step 2: for each fact, retrieve evidence and judge — all facts run in parallel
     judge_chain = PromptTemplate.from_template(_JUDGE_FACT_PROMPT) | verify_llm | parser
+    domain = state.get("rag_domain") or ""
 
-    for fact in facts:
-        docs = _search(fact, state.get("rag_domain") or "")
+    def _check_one_fact(fact: str) -> FactVerification:
+        docs = _search(fact, domain)
         if docs:
             logger.info(
                 "[verify_facts] ch%d | fact: %s\n  retrieved %d chunk(s):\n%s",
-                idx + 1,
-                fact,
-                len(docs),
+                idx + 1, fact, len(docs),
                 "\n".join(
                     f"  [{i+1}] ({d.metadata.get('source','?')} p{d.metadata.get('chunk_id','?')}) "
                     f"{d.page_content[:200]!r}..."
@@ -814,7 +819,6 @@ def verify_facts(state: StoryState) -> dict:
         raw_verdict = judge_chain.invoke({"fact": fact, "evidence": evidence}).strip()
         raw_verdict = re.sub(r"^```(?:json)?\s*", "", raw_verdict)
         raw_verdict = re.sub(r"\s*```$", "", raw_verdict)
-
         try:
             judgment = json.loads(raw_verdict)
             verdict = judgment.get("verdict", "unknown")
@@ -825,7 +829,15 @@ def verify_facts(state: StoryState) -> dict:
             verdict, reason = "unknown", ""
 
         logger.info("[verify_facts] ch%d | [%s] %s — %s", idx + 1, verdict.upper(), fact, reason)
-        results.append(FactVerification(fact=fact, verdict=verdict, evidence=reason))
+        return FactVerification(fact=fact, verdict=verdict, evidence=reason)
+
+    fact_order = {f: i for i, f in enumerate(facts)}
+    results: List[FactVerification] = []
+    with ThreadPoolExecutor(max_workers=min(len(facts), 6)) as pool:
+        futures = {pool.submit(_check_one_fact, fact): fact for fact in facts}
+        for future in as_completed(futures):
+            results.append(future.result())
+    results.sort(key=lambda r: fact_order.get(r["fact"], 999))
 
     contradicted = sum(1 for r in results if r["verdict"] == "contradicted")
     status = (
