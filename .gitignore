@@ -9,3 +9,4 @@ dist/
 .env
 /source/*
 /sounds/*
+*/node_modules
