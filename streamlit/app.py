@@ -153,13 +153,10 @@ if submitted:
     story_placeholder = st.empty()
 
     _NODE_PROGRESS = {
-        "plan_story":      10,
-        "write_chapter":   30,
-        "reflect_chapter": 50,
-        "revise_chapter":  55,
-        "iterate_chapter": 58,
-        "advance_chapter": 70,
-        "polish_story":    90,
+        "plan_story":        10,
+        "write_chapter":     70,  # parallel writes — each one bumps to 70
+        "assemble_chapters": 80,
+        "polish_story":      90,
     }
 
     payload = {

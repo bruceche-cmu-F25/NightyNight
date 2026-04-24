@@ -1,11 +1,12 @@
 import json
 import logging
+import operator
 import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from langchain_core.documents import Document
@@ -14,6 +15,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_milvus import Milvus
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 from pymilvus import connections, utility
 from typing_extensions import TypedDict
 
@@ -22,6 +24,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── RAG / Milvus Config ───────────────────────────────────────────────────────
+
 _MILVUS_URI = os.getenv("MILVUS_URI", "http://34.67.37.109:19530")
 # _MILVUS_URI = os.getenv("MILVUS_URI", "http://localhost:19530")
 _MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
@@ -38,12 +41,6 @@ class ChapterPlan(TypedDict):
     summary: str  # 1-2 sentence description of what this chapter covers
 
 
-class FactVerification(TypedDict):
-    fact: str      # the extracted factual claim
-    verdict: str   # "supported" | "contradicted" | "unknown"
-    evidence: str  # brief summary of retrieved evidence (or empty string)
-
-
 class _StoryStateRequired(TypedDict, total=True):
     """Fields that MUST be supplied by the caller before the graph runs."""
     topic: str
@@ -51,37 +48,33 @@ class _StoryStateRequired(TypedDict, total=True):
     style: str          # narration style, e.g. "calm documentary", "gentle bedtime"
     audience: str       # target audience, e.g. "curious adults", "science enthusiasts"
     domain: str         # science domain, e.g. "astronomy", "biology", "history of science"
-                        # used in prompts, RAG queries, and future TTS voice selection
 
 
 class StoryState(_StoryStateRequired, total=False):
-    """Full graph state.  Required fields are inherited from _StoryStateRequired (total=True).
+    """Full graph state.  Required fields inherited from _StoryStateRequired (total=True).
     Everything below is optional — nodes populate these fields incrementally.
     """
 
     # ── Derived from duration_min by plan_story ──
-    num_chapters: int           # how many chapters to generate
-    target_total_words: int     # total word count goal for the finished story
-    words_per_chapter: int      # target per chapter = target_total_words // num_chapters
+    num_chapters: int
+    target_total_words: int
+    words_per_chapter: int
 
     # ── Pipeline state ──
-    chapter_plans: list[ChapterPlan]  # set by plan_story
-    current_chapter_index: int         # which chapter we're currently writing
-    current_chapter_draft: Optional[str]
-    reflect_feedback: Optional[str]
-    reflect_passed: Optional[bool]
-    chapter_rewrite_count: int         # resets to 0 for each new chapter
-    completed_chapters: list[str]      # approved chapter texts in order
-    forced_chapters: list[int]         # indices of chapters force-advanced after max retries
+    chapter_plans: list[ChapterPlan]   # set by plan_story
+
+    # Per-Send field: which chapter this write_chapter invocation is writing
+    chapter_index: int
+
+    # Parallel collection — reducer appends each (index, text) tuple from parallel writes
+    chapter_drafts: Annotated[list[tuple[int, str]], operator.add]
+
+    # Assembled in order by assemble_chapters
+    completed_chapters: list[str]
+
     final_story: Optional[str]         # set by polish_story
-    status_message: Optional[str]
-
-    # ── RAG fact-verification (set by verify_facts, consumed by reflect_chapter) ──
-    fact_verification_results: Optional[list[FactVerification]]
-
-    # ── Resolved RAG domain (set by plan_story) ───────────────────────────────
-    # One of "cosmos" | "life" | "civilization" | None (None = search all domains)
-    rag_domain: Optional[str]
+    # Annotated with last-wins reducer — parallel write_chapter nodes all emit this
+    status_message: Annotated[Optional[str], lambda _, b: b]
 
 
 # ── SECTION 2: Duration → Story Parameter Helper ─────────────────────────────
@@ -90,7 +83,6 @@ class StoryState(_StoryStateRequired, total=False):
 _WORDS_PER_MIN = 135
 
 # Maps duration_min to a sensible chapter count so pacing stays natural.
-# Shorter episodes → fewer, fuller chapters; longer → more chapters, similar length each.
 _DURATION_TO_CHAPTERS = [
     (10,  3),
     (15,  4),
@@ -101,7 +93,6 @@ _DURATION_TO_CHAPTERS = [
 
 def derive_story_params(duration_min: int) -> tuple[int, int, int]:
     """Return (num_chapters, target_total_words, words_per_chapter) for a given duration."""
-    # Pick the closest chapter count from the table (clamp to boundaries)
     num_chapters = _DURATION_TO_CHAPTERS[-1][1]
     for threshold, chapters in _DURATION_TO_CHAPTERS:
         if duration_min <= threshold:
@@ -114,12 +105,7 @@ def derive_story_params(duration_min: int) -> tuple[int, int, int]:
 
 
 def _parse_chapter_plans(raw: str, expected_count: int) -> list[ChapterPlan]:
-    """Parse and validate the JSON chapter outline returned by the LLM.
-
-    Raises ValueError with a descriptive message on any structural problem
-    so the failure is obvious during debugging rather than a cryptic KeyError
-    or AttributeError later in the pipeline.
-    """
+    """Parse and validate the JSON chapter outline returned by the LLM."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -157,7 +143,7 @@ def _parse_chapter_plans(raw: str, expected_count: int) -> list[ChapterPlan]:
     return [ChapterPlan(title=c["title"], summary=c["summary"]) for c in data]
 
 
-# ── SECTION 3: Prompts (Structured Prompt Format) ────────────────────────────
+# ── SECTION 3: Prompts ────────────────────────────────────────────────────────
 
 PLAN_PROMPT = """\
 #Role: You are a science educator and narrative producer creating structured \
@@ -211,17 +197,17 @@ that is pleasant to listen to while drifting toward sleep.
 
 #Topic: The story is about "{topic}" (domain: {domain}).
 
-#Context:
-  Chapter title: {title}
-  Chapter focus: {summary}
+#Full Story Outline (for narrative awareness — do NOT skip ahead or behind):
+{full_outline}
+
+#This Chapter:
+  Title: {title}
+  Focus: {summary}
   Target audience: {audience}
-  Story so far (for narrative continuity):
-  ---
-  {story_so_far}
-  ---
 
 #Format: Plain prose only. No title, no headers, no bullet points. \
-Target approximately {words_per_chapter} words.
+Target approximately {words_per_chapter} words \
+(acceptable range: {words_min}–{words_max} words).
 
 #Tone / Style: {style} — warm and unhurried. Short sentences. Natural pauses. \
 Analogies drawn from everyday life to make abstract concepts land clearly.
@@ -235,151 +221,33 @@ Factual content:
 - Each chapter must convey 2–3 real scientific ideas — not just mood or imagery
 - Always describe a phenomenon in plain, everyday language first before naming it
 - For a "{audience}" audience: if the audience is "curious adults" or \
-  "science enthusiasts", you may then introduce the technical name as an optional \
-  label after the plain description (e.g. "this tendency for heat to spread out — \
-  what scientists call the second law of thermodynamics"); if the audience is \
-  "general public", skip technical names entirely and stay with the plain description
+  "science enthusiasts", you may introduce the technical name as an optional \
+  label after the plain description; if the audience is "general public", \
+  skip technical names entirely
 - Do not invent specific numbers, percentages, or historical lab procedures; \
-  if a precise figure is not very well established, use scale instead \
-  ("millions of years", "a few degrees warmer", "roughly half")
+  use scale instead ("millions of years", "a few degrees warmer", "roughly half")
 - Analogies and atmosphere should serve the science, not replace it
 
 Audio / narration quality:
 - Write for listening, not reading — a listener cannot re-read a sentence
-- Avoid long nested sentences and dense chains of cause-and-effect in a single sentence; \
-  break them into two or three shorter ones
+- Avoid long nested sentences; break dense cause-and-effect chains into two or three shorter ones
 - Prefer one main idea per paragraph; do not stack two explanations back to back
-- After a technical point, insert a soft transition — a brief image, an analogy, \
-  or a single quiet sentence — before moving to the next idea
+- After a technical point, insert a soft transition before moving to the next idea
 - Do not use "firstly", "secondly", "finally", or any list-like transitions
 - Do not include the chapter title in your output
 - Do not end on an exciting cliffhanger — close with a sense of calm continuity
-"""
 
-REFLECT_PROMPT = """\
-#Role: You are a careful scientific editor and narrative quality reviewer \
-for a bedtime science podcast aimed at adults.
+Narrative continuity:
+- Connect naturally to the chapter before and after yours per the outline above
+- Do not overlap scientific content already covered by adjacent chapters
 
-#Task: Review the following chapter and decide if it meets quality standards.
-
-#Context:
-  Story topic: "{topic}"
-  This is chapter {chapter_num}.
-  Target chapter length: ~{words_per_chapter} words (acceptable range: \
-{words_per_chapter_min}–{words_per_chapter_max} words)
-  Story so far (for continuity reference):
-  ---
-  {story_so_far}
-  ---
-  Chapter to review:
-  ---
-  {current_chapter_draft}
-  ---
-
-#Format: Reply ONLY in one of these two exact formats — nothing else:
-
-  PASSED
-
-  or
-
-  NEEDS_REVISION
-  - <specific issue 1>
-  - <specific issue 2>
-
-#Goal: Ensure every chapter is scientifically sound, educationally substantive, \
-appropriately paced, appropriately calm, and flows naturally from what came before.
-
-#Requirements / Constraints:
-- Check scientific accuracy — flag any errors, outdated claims, or misleading simplifications
-- Check factual density — flag if the chapter is predominantly atmosphere/imagery with fewer \
-  than 2–3 real scientific ideas; pure mood is not sufficient
-- Check jargon order — for audience "{audience}": if "curious adults" or "science enthusiasts", \
-  technical labels are allowed only when the phenomenon was first explained in plain language \
-  immediately before the label; if "general public", flag any technical label regardless; \
-  also flag any specific number or percentage that appears invented or hard to verify — \
-  prefer scale expressions
-- Check audio quality — flag long nested sentences or back-to-back technical explanations \
-  without a soft transition; a listener cannot re-read, so each idea must land on its own
-- Check tone — it must be soothing and unhurried, suitable for bedtime; flag anything too \
-  exciting or intense
-- Check continuity — it must connect naturally to the preceding text
-- Check pacing / length — count the approximate words in the chapter; flag if it falls \
-  outside the acceptable range ({words_per_chapter_min}–{words_per_chapter_max} words); \
-  a chapter that is too short will leave dead air, too long will overrun the episode runtime
-- Do NOT rewrite the chapter; only identify issues
-- Be concise in your feedback — one line per issue
-
-## RAG Fact-Verification Results
-The following facts were extracted from this chapter and checked against the knowledge base:
-{fact_verification_results}
-
-Treat "contradicted" verdicts as high-priority issues — flag each one explicitly.
-"unknown" means no evidence was found AND the claim is overly specific or unverifiable — \
-flag it and ask the writer to hedge the language (e.g. "some researchers suggest...").
-"not_in_kb" means no evidence was found but the claim is a well-known scientific concept \
-or named theory — do NOT flag these; absence from the knowledge base is not an error.
-"supported" facts do not need to be flagged.
-"""
-
-REVISE_CHAPTER_PROMPT = """\
-#Role: You are a science narrator revising a chapter based on a reviewer's \
-specific feedback. Your revision must fix every flagged issue without \
-sacrificing scientific accuracy or introducing new errors.
-
-#Task: Rewrite chapter {chapter_num} of {num_chapters} to address every issue \
-raised in the reflection feedback below.
-
-#Topic: The story is about "{topic}" (domain: {domain}).
-
-#Context:
-  Chapter title: {title}
-  Chapter focus: {summary}
-  Target audience: {audience}
-  Story so far (for narrative continuity):
-  ---
-  {story_so_far}
-  ---
-  Previous draft (the text that was reviewed):
-  ---
-  {previous_draft}
-  ---
-  Reviewer feedback (issues you MUST fix):
-  ---
-  {reflect_feedback}
-  ---
-
-#Format: Plain prose only. No title, no headers, no bullet points. \
-Target approximately {words_per_chapter} words.
-
-#Tone / Style: {style} — warm and unhurried, suitable for listening while \
-relaxed. Analogies should clarify science, not replace it.
-
-#Goal: A revised chapter that fixes every flagged issue and still delivers \
-at least 2–3 concrete scientific facts in an accessible, calm way.
-
-#Requirements / Constraints:
-- Address each bullet point in the reviewer feedback explicitly
-- Each chapter must convey 2–3 real scientific ideas — do not let atmosphere crowd out substance
-- Always describe a phenomenon in plain language first before naming it; for a \
-  "{audience}" audience, a technical name may follow the plain description as an \
-  optional label — never drop a term without explaining it first
-- Do not invent specific numbers or procedures; use scale expressions if precision is uncertain
-- Avoid long nested sentences — break dense cause-and-effect chains into shorter ones
-- Prefer one main idea per paragraph; insert a soft transition between technical points
-- Do not introduce new scientific inaccuracies while fixing old ones
-- Do not include the chapter title in your output
-- Keep the same narrative position in the story arc — do not jump ahead
-- Maintain the calm, soothing tone throughout
-
-#Handling RAG-flagged claims (UNKNOWN verdict):
-When the reviewer flags a claim because it could not be verified against the knowledge base, \
-DO NOT delete the content — hedge the certainty of the language instead. \
-The scientific substance must stay; only the confidence level should change. \
-Use phrases such as: "scientists believe...", "evidence suggests...", \
-"researchers have proposed...", "one widely held idea is...", \
-"some estimates place this at around...", "according to some researchers...". \
-Apply this to: specific dates, named locations, named hypotheses, and causal chains \
-that are plausible but not universally confirmed in the sources.
+Self-check before finishing — your output MUST:
+✓ Contain 2–3 distinct real scientific facts (not just atmosphere)
+✓ Fall within {words_min}–{words_max} words
+✓ Flow naturally from the preceding chapter and into the next
+✓ End calmly without a cliffhanger
+✗ Do NOT invent specific figures you cannot verify
+✗ Do NOT include the chapter title
 """
 
 POLISH_PROMPT = """\
@@ -421,27 +289,17 @@ what it said before — just with smoother joins and a more consistent voice.
 """
 
 
-# ── SECTION 4: LLMs & Parser ─────────────────────────────────────────────────
+# ── SECTION 4: LLM & Parser ───────────────────────────────────────────────────
 
 # Generation: most capable model for rich, creative story writing and polishing
 generation_llm = ChatGoogleGenerativeAI(
     model="gemini-3-flash-preview", temperature=0.75
 )
 
-# Reflection: fast, analytical model for structured quality review
-reflect_llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", temperature=0.2
-)
-
-# Fact verification: temperature=0 for deterministic supported/contradicted/unknown judgments
-verify_llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash", temperature=0.0
-)
-
 parser = StrOutputParser()
 
 
-# ── SECTION 4b: RAG Helpers ───────────────────────────────────────────────────
+# ── SECTION 4b: RAG Helpers (used by ingest_sources utility) ─────────────────
 
 _embeddings: Optional[GoogleGenerativeAIEmbeddings] = None
 _vector_store: Optional[Milvus] = None
@@ -470,22 +328,8 @@ def _get_vector_store() -> Optional[Milvus]:
         )
         return _vector_store
     except Exception as exc:
-        logger.warning("Milvus unavailable — verify_facts will skip RAG: %s", exc)
+        logger.warning("Milvus unavailable: %s", exc)
         return None
-
-
-def _search(query: str, domain: str, top_k: int = _RAG_TOP_K) -> List[Document]:
-    vs = _get_vector_store()
-    if vs is None:
-        return []
-    try:
-        search_kwargs: Dict[str, Any] = {"k": top_k}
-        if domain:
-            search_kwargs["expr"] = f'domain == "{domain}"'
-        return vs.as_retriever(search_kwargs=search_kwargs).invoke(query)
-    except Exception as exc:
-        logger.warning("RAG search failed: %s", exc)
-        return []
 
 
 # Chunking params (override via env)
@@ -571,8 +415,6 @@ def ingest_sources(sources_dir: str, drop_old: bool = False) -> Dict[str, Any]:
 
         domain_stats[domain] = pdf_count
 
-    # Batch insert to avoid hitting the Gemini embedding rate limit (3000 req/min).
-    # Each add_documents call embeds one batch; pause between batches.
     _INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "200"))
     _INGEST_BATCH_PAUSE = float(os.getenv("INGEST_BATCH_PAUSE_SEC", "5"))
 
@@ -597,89 +439,7 @@ def ingest_sources(sources_dir: str, drop_old: bool = False) -> Dict[str, Any]:
     }
 
 
-# ── SECTION 4c: Domain Classifier ────────────────────────────────────────────
-
-_DOMAIN_CLASSIFIER_PROMPT = """\
-You have a knowledge base with exactly three domain folders:
-- "cosmos"       — astronomy, astrophysics, cosmology, space, physics, the universe
-- "life"         — biology, ecology, evolution, genetics, neuroscience, medicine
-- "civilization" — history, archaeology, anthropology, ancient cultures, world civilizations
-
-Given the topic below, decide which folder is the best match.
-If the topic clearly belongs to one of the three, return that folder name.
-If the topic spans multiple folders or does not fit any, return "other".
-
-Topic: {topic}
-
-Reply with ONLY one word: cosmos | life | civilization | other
-"""
-
-
-def _classify_rag_domain(topic: str) -> Optional[str]:
-    """Map the story topic to a known Milvus folder, or None to search all domains."""
-    raw = (
-        PromptTemplate.from_template(_DOMAIN_CLASSIFIER_PROMPT)
-        | reflect_llm
-        | parser
-    ).invoke({"topic": topic}).strip().lower()
-
-    resolved = raw if raw in {"cosmos", "life", "civilization"} else None
-    logger.info("[domain_classifier] topic='%s' → rag_domain='%s'", topic, resolved)
-    return resolved
-
-
-# ── SECTION 4d: Fact-Verification Prompts ────────────────────────────────────
-
-_EXTRACT_FACTS_PROMPT = """\
-Extract the key verifiable scientific facts from the chapter below.
-Focus only on specific, checkable claims: numbers, mechanisms, named phenomena, \
-historical events, or cause-effect relationships.
-Skip atmospheric descriptions, transitions, and rhetorical sentences.
-
-Return ONLY a JSON array of strings — no markdown, no commentary, no extra keys.
-Aim for 3–6 items. If there are fewer real facts, return fewer.
-
-Chapter:
----
-{chapter_text}
----
-"""
-
-_JUDGE_FACT_PROMPT = """\
-You are a scientific fact-checker.
-
-Fact to check:
-"{fact}"
-
-Evidence from the knowledge base (may be empty):
----
-{evidence}
----
-
-Verdict options:
-- "supported"    — the retrieved evidence clearly confirms the fact
-- "contradicted" — the retrieved evidence clearly contradicts the fact
-- "unknown"      — no evidence was retrieved AND the claim is overly specific, states a \
-  precise figure, or references an obscure concept that cannot be assumed as general \
-  knowledge — the narration should hedge or soften this claim
-- "not_in_kb"    — no evidence was retrieved BUT the claim describes a well-known, widely \
-  accepted scientific concept or named theory; absence from the knowledge base does not \
-  make it suspect — no action needed
-
-Reply with ONLY a JSON object, no markdown:
-{{"verdict": "<supported|contradicted|unknown|not_in_kb>", "reason": "<one short sentence>"}}
-"""
-
-
 # ── SECTION 5: Node Functions ────────────────────────────────────────────────
-
-
-def _story_so_far(state: StoryState) -> str:
-    return (
-        "\n\n".join(state["completed_chapters"])
-        if state["completed_chapters"]
-        else "This is the opening chapter — there is no preceding text."
-    )
 
 
 def plan_story(state: StoryState) -> dict:
@@ -687,12 +447,13 @@ def plan_story(state: StoryState) -> dict:
     logger.info("=" * 60)
     logger.info("[plan_story] topic='%s' domain='%s' duration=%dmin",
                 state["topic"], state["domain"], state["duration_min"])
+
     num_chapters, target_total_words, words_per_chapter = derive_story_params(
         state["duration_min"]
     )
 
     chain = PromptTemplate.from_template(PLAN_PROMPT) | generation_llm | parser
-    plan_inputs = {
+    raw = chain.invoke({
         "topic": state["topic"],
         "domain": state["domain"],
         "audience": state["audience"],
@@ -701,16 +462,8 @@ def plan_story(state: StoryState) -> dict:
         "num_chapters": num_chapters,
         "target_total_words": target_total_words,
         "words_per_chapter": words_per_chapter,
-    }
+    }).strip()
 
-    # Domain classification and chapter planning are independent — run in parallel
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        domain_future = pool.submit(_classify_rag_domain, state["topic"])
-        plan_future = pool.submit(chain.invoke, plan_inputs)
-        rag_domain = domain_future.result()
-        raw = plan_future.result().strip()
-
-    # Strip markdown code fences if the model wraps the JSON anyway
     raw = re.sub(r"^```(?:json)?\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
 
@@ -723,14 +476,7 @@ def plan_story(state: StoryState) -> dict:
         "target_total_words": target_total_words,
         "words_per_chapter": words_per_chapter,
         "chapter_plans": chapter_plans,
-        "rag_domain": rag_domain,
-        "current_chapter_index": 0,
-        "current_chapter_draft": None,
-        "reflect_feedback": None,
-        "reflect_passed": None,
-        "chapter_rewrite_count": 0,
-        "completed_chapters": [],
-        "forced_chapters": [],
+        "chapter_drafts": [],
         "status_message": (
             f"Outline ready: {num_chapters} chapters, "
             f"~{words_per_chapter} words each, "
@@ -739,250 +485,62 @@ def plan_story(state: StoryState) -> dict:
     }
 
 
-def write_chapter(state: StoryState) -> dict:
-    """Write the initial draft of the current chapter (no prior feedback)."""
-    idx = state["current_chapter_index"]
-    plan = state["chapter_plans"][idx]
-    logger.info("-" * 60)
-    logger.info("[write_chapter] ch%d/%d: '%s'", idx + 1, state["num_chapters"], plan["title"])
+def write_chapter(state: dict) -> dict:
+    """Write one chapter. Invoked in parallel for all chapters via Send."""
+    idx = state["chapter_index"]
+    plans: list[ChapterPlan] = state["chapter_plans"]
+    plan = plans[idx]
+    num = state["num_chapters"]
 
+    # Build a readable outline of all chapters so each writer knows the full arc
+    full_outline = "\n".join(
+        f"  Ch{i + 1}: {p['title']} — {p['summary']}"
+        for i, p in enumerate(plans)
+    )
+
+    target = state["words_per_chapter"]
     chain = PromptTemplate.from_template(WRITE_CHAPTER_PROMPT) | generation_llm | parser
     draft = chain.invoke({
         "chapter_num": idx + 1,
-        "num_chapters": state["num_chapters"],
+        "num_chapters": num,
         "topic": state["topic"],
         "domain": state["domain"],
         "title": plan["title"],
         "summary": plan["summary"],
         "audience": state["audience"],
         "style": state["style"],
-        "words_per_chapter": state["words_per_chapter"],
-        "story_so_far": _story_so_far(state),
+        "words_per_chapter": target,
+        "words_min": int(target * 0.75),
+        "words_max": int(target * 1.25),
+        "full_outline": full_outline,
     }).strip()
 
     word_count = len(draft.split())
-    logger.info("[write_chapter] ch%d done — %d words", idx + 1, word_count)
+    logger.info("[write_chapter] ch%d/%d done — %d words: '%s'",
+                idx + 1, num, word_count, plan["title"])
 
     return {
-        "current_chapter_draft": draft,
-        "reflect_feedback": None,
-        "status_message": f"Chapter {idx + 1}/{len(state['chapter_plans'])} drafted: \"{plan['title']}\"",
+        "chapter_drafts": [(idx, draft)],
+        "status_message": f"Chapter {idx + 1}/{num} written: \"{plan['title']}\"",
     }
 
 
-def verify_facts(state: StoryState) -> dict:
-    """Extract verifiable facts from the current draft and check each against Milvus.
-
-    Uses reflect_llm (temperature=0) for deterministic verdicts.
-    Gracefully degrades to empty results if Milvus is unavailable.
-    """
-    idx = state["current_chapter_index"]
-    logger.info("[verify_facts] ch%d — extracting facts from draft...", idx + 1)
-    chapter_text = state["current_chapter_draft"] or ""
-
-    # Step 1: extract checkable facts from the chapter
-    extract_chain = PromptTemplate.from_template(_EXTRACT_FACTS_PROMPT) | verify_llm | parser
-    raw_facts = extract_chain.invoke({"chapter_text": chapter_text}).strip()
-    raw_facts = re.sub(r"^```(?:json)?\s*", "", raw_facts)
-    raw_facts = re.sub(r"\s*```$", "", raw_facts)
-
-    try:
-        facts: List[str] = json.loads(raw_facts)
-        if not isinstance(facts, list):
-            facts = []
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("[verify_facts] ch%d — fact extraction returned non-JSON; skipping RAG verify", idx + 1)
-        facts = []
-
-    logger.info("[verify_facts] ch%d — extracted %d facts: %s", idx + 1, len(facts), facts)
-
-    # Step 2: for each fact, retrieve evidence and judge — all facts run in parallel
-    judge_chain = PromptTemplate.from_template(_JUDGE_FACT_PROMPT) | verify_llm | parser
-    domain = state.get("rag_domain") or ""
-
-    def _check_one_fact(fact: str) -> FactVerification:
-        docs = _search(fact, domain)
-        if docs:
-            logger.info(
-                "[verify_facts] ch%d | fact: %s\n  retrieved %d chunk(s):\n%s",
-                idx + 1, fact, len(docs),
-                "\n".join(
-                    f"  [{i+1}] ({d.metadata.get('source','?')} p{d.metadata.get('chunk_id','?')}) "
-                    f"{d.page_content[:200]!r}..."
-                    for i, d in enumerate(docs)
-                ),
-            )
-        else:
-            logger.info("[verify_facts] ch%d | fact: %s → no chunks retrieved", idx + 1, fact)
-        evidence = "\n".join(f"- {d.page_content}" for d in docs) if docs else "(no evidence retrieved)"
-
-        raw_verdict = judge_chain.invoke({"fact": fact, "evidence": evidence}).strip()
-        raw_verdict = re.sub(r"^```(?:json)?\s*", "", raw_verdict)
-        raw_verdict = re.sub(r"\s*```$", "", raw_verdict)
-        try:
-            judgment = json.loads(raw_verdict)
-            verdict = judgment.get("verdict", "unknown")
-            if verdict not in {"supported", "contradicted", "unknown", "not_in_kb"}:
-                verdict = "unknown"
-            reason = judgment.get("reason", "")
-        except (json.JSONDecodeError, ValueError):
-            verdict, reason = "unknown", ""
-
-        logger.info("[verify_facts] ch%d | [%s] %s — %s", idx + 1, verdict.upper(), fact, reason)
-        return FactVerification(fact=fact, verdict=verdict, evidence=reason)
-
-    fact_order = {f: i for i, f in enumerate(facts)}
-    results: List[FactVerification] = []
-    with ThreadPoolExecutor(max_workers=min(len(facts), 6)) as pool:
-        futures = {pool.submit(_check_one_fact, fact): fact for fact in facts}
-        for future in as_completed(futures):
-            results.append(future.result())
-    results.sort(key=lambda r: fact_order.get(r["fact"], 999))
-
-    contradicted = sum(1 for r in results if r["verdict"] == "contradicted")
-    status = (
-        f"Chapter {idx + 1} facts verified: "
-        f"{sum(1 for r in results if r['verdict'] == 'supported')} supported, "
-        f"{contradicted} contradicted, "
-        f"{sum(1 for r in results if r['verdict'] == 'unknown')} unknown."
-    )
-    return {"fact_verification_results": results, "status_message": status}
-
-
-def _format_fact_verification(results: Optional[List[FactVerification]]) -> str:
-    if not results:
-        return "(no fact-verification results available)"
-    lines = []
-    for r in results:
-        lines.append(f"- [{r['verdict'].upper()}] {r['fact']}"
-                     + (f" — {r['evidence']}" if r["evidence"] else ""))
-    return "\n".join(lines)
-
-
-def reflect_chapter(state: StoryState) -> dict:
-    """Evaluate the current draft for scientific accuracy, tone, and continuity."""
-    idx = state["current_chapter_index"]
-
-    target = state["words_per_chapter"]
-    chain = PromptTemplate.from_template(REFLECT_PROMPT) | reflect_llm | parser
-    content = chain.invoke({
-        "chapter_num": idx + 1,
-        "topic": state["topic"],
-        "audience": state["audience"],
-        "words_per_chapter": target,
-        "words_per_chapter_min": int(target * 0.75),
-        "words_per_chapter_max": int(target * 1.25),
-        "current_chapter_draft": state["current_chapter_draft"],
-        "story_so_far": _story_so_far(state),
-        "fact_verification_results": _format_fact_verification(
-            state.get("fact_verification_results")
-        ),
-    }).strip()
-
-    passed = content.startswith("PASSED")
-    logger.info("[reflect_chapter] ch%d — %s", idx + 1, "PASSED" if passed else "NEEDS_REVISION")
-    if not passed:
-        for line in content.splitlines()[1:]:
-            if line.strip():
-                logger.info("  %s", line.strip())
-    return {
-        "reflect_feedback": content,
-        "reflect_passed": passed,
-        "status_message": (
-            f"Chapter {idx + 1} approved."
-            if passed
-            else f"Chapter {idx + 1} needs revision."
-        ),
-    }
-
-
-def iterate_chapter(state: StoryState) -> dict:
-    """Increment the revision counter after each revise → reflect cycle."""
-    new_count = state["chapter_rewrite_count"] + 1
-    idx = state["current_chapter_index"]
-    return {
-        "chapter_rewrite_count": new_count,
-        "status_message": f"Chapter {idx + 1} revision attempt {new_count} complete.",
-    }
-
-
-def revise_chapter(state: StoryState) -> dict:
-    """Rewrite the current chapter using the reviewer's specific feedback.
-
-    This is the key difference from write_chapter: the revision prompt explicitly
-    includes both the previous draft and the reflect_feedback, so the LLM knows
-    exactly what to fix rather than regenerating blindly from scratch.
-    """
-    idx = state["current_chapter_index"]
-    plan = state["chapter_plans"][idx]
-
-    chain = PromptTemplate.from_template(REVISE_CHAPTER_PROMPT) | generation_llm | parser
-    revised = chain.invoke({
-        "chapter_num": idx + 1,
-        "num_chapters": state["num_chapters"],
-        "topic": state["topic"],
-        "domain": state["domain"],
-        "title": plan["title"],
-        "summary": plan["summary"],
-        "audience": state["audience"],
-        "style": state["style"],
-        "words_per_chapter": state["words_per_chapter"],
-        "story_so_far": _story_so_far(state),
-        "previous_draft": state["current_chapter_draft"],
-        "reflect_feedback": state["reflect_feedback"],
-    }).strip()
-
-    word_count = len(revised.split())
-    logger.info("[revise_chapter] ch%d done — %d words", idx + 1, word_count)
-    return {
-        "current_chapter_draft": revised,
-        "status_message": f"Chapter {idx + 1} revised based on feedback.",
-    }
-
-
-def advance_chapter(state: StoryState) -> dict:
-    """Commit the current chapter and reset revision state for the next one.
-
-    If reflect_passed is False here, the chapter was force-advanced after exhausting
-    retries. Record its index in forced_chapters for later debugging/analysis.
-    """
-    idx = state["current_chapter_index"]
-    completed = list(state["completed_chapters"]) + [state["current_chapter_draft"]]
-    next_idx = idx + 1
-    total = len(state["chapter_plans"])
-    forced = list(state["forced_chapters"])
-
-    was_forced = not state.get("reflect_passed", True)
-    if was_forced:
-        forced.append(idx)
-        status = (
-            f"WARNING: Chapter {idx + 1} force-advanced after "
-            f"{state['chapter_rewrite_count']} failed revision(s). "
-            + (f"Moving to chapter {next_idx + 1}." if next_idx < total else "Proceeding to polish.")
-        )
-    else:
-        status = (
-            f"Chapter {idx + 1} approved and committed. "
-            + (f"Moving to chapter {next_idx + 1} of {total}." if next_idx < total else "All chapters done. Polishing the full story.")
-        )
-
+def assemble_chapters(state: StoryState) -> dict:
+    """Sort parallel chapter drafts by index and assemble into completed_chapters."""
+    sorted_drafts = sorted(state.get("chapter_drafts", []), key=lambda x: x[0])
+    completed = [text for _, text in sorted_drafts]
+    logger.info("[assemble_chapters] assembled %d chapters in order", len(completed))
     return {
         "completed_chapters": completed,
-        "forced_chapters": forced,
-        "current_chapter_index": next_idx,
-        "current_chapter_draft": None,
-        "reflect_feedback": None,
-        "reflect_passed": None,
-        "chapter_rewrite_count": 0,
-        "fact_verification_results": None,
-        "status_message": status,
+        "status_message": f"All {len(completed)} chapters assembled.",
     }
 
 
 def polish_story(state: StoryState) -> dict:
     """Final editing pass over the assembled story for consistent tone and flow."""
     logger.info("=" * 60)
-    logger.info("[polish_story] all %d chapters done, running final polish...", len(state["completed_chapters"]))
+    logger.info("[polish_story] %d chapters, running final polish...",
+                len(state["completed_chapters"]))
     joined = "\n\n".join(state["completed_chapters"])
 
     chain = PromptTemplate.from_template(POLISH_PROMPT) | generation_llm | parser
@@ -998,37 +556,15 @@ def polish_story(state: StoryState) -> dict:
     }
 
 
-# ── SECTION 6: Routing ───────────────────────────────────────────────────────
+# ── SECTION 6: Dispatch ──────────────────────────────────────────────────────
 
 
-def route_after_reflect(state: StoryState) -> str:
-    """After reflection: approved → advance, failed → revise or force-advance if retries exhausted.
-
-    The force-advance decision lives here — after reflection has run — so the last
-    revised draft always gets evaluated before we decide to give up on it.
-    """
-    if state["reflect_passed"]:
-        return "advance_chapter"
-    if state["chapter_rewrite_count"] >= 2:
-        # Retries exhausted: advance_chapter will detect reflect_passed=False and log a warning
-        return "advance_chapter"
-    return "revise_chapter"
-
-
-def route_after_iterate(_: StoryState) -> str:
-    """After incrementing the counter: always return to reflect_chapter.
-
-    The counter is for bookkeeping only — the decision to stop retrying is made
-    in route_after_reflect, after the revised draft has been evaluated.
-    """
-    return "reflect_chapter"
-
-
-def route_after_advance(state: StoryState) -> str:
-    """After advancing: write the next chapter or move to polish."""
-    if state["current_chapter_index"] < len(state["chapter_plans"]):
-        return "write_chapter"
-    return "polish_story"
+def dispatch_chapters(state: StoryState) -> list[Send]:
+    """Fan out: send one write_chapter task per chapter, all run in parallel."""
+    return [
+        Send("write_chapter", {**state, "chapter_index": i})
+        for i in range(state["num_chapters"])
+    ]
 
 
 # ── SECTION 7: Graph Assembly ────────────────────────────────────────────────
@@ -1037,42 +573,17 @@ builder = StateGraph(StoryState)
 
 builder.add_node("plan_story", plan_story)
 builder.add_node("write_chapter", write_chapter)
-builder.add_node("verify_facts", verify_facts)
-builder.add_node("reflect_chapter", reflect_chapter)
-builder.add_node("revise_chapter", revise_chapter)
-builder.add_node("iterate_chapter", iterate_chapter)
-builder.add_node("advance_chapter", advance_chapter)
+builder.add_node("assemble_chapters", assemble_chapters)
 builder.add_node("polish_story", polish_story)
 
 builder.set_entry_point("plan_story")
-builder.add_edge("plan_story", "write_chapter")
-builder.add_edge("write_chapter", "verify_facts")
-builder.add_edge("verify_facts", "reflect_chapter")
-builder.add_conditional_edges(
-    "reflect_chapter",
-    route_after_reflect,
-    {
-        "revise_chapter": "revise_chapter",
-        "advance_chapter": "advance_chapter",
-    },
-)
-builder.add_edge("revise_chapter", "iterate_chapter")
-builder.add_conditional_edges(
-    "iterate_chapter",
-    route_after_iterate,
-    {
-        "reflect_chapter": "reflect_chapter",
-        "advance_chapter": "advance_chapter",
-    },
-)
-builder.add_conditional_edges(
-    "advance_chapter",
-    route_after_advance,
-    {
-        "write_chapter": "write_chapter",
-        "polish_story": "polish_story",
-    },
-)
+
+# plan_story → dispatch_chapters fans out to N parallel write_chapter nodes
+builder.add_conditional_edges("plan_story", dispatch_chapters, ["write_chapter"])
+
+# All write_chapter branches converge at assemble_chapters
+builder.add_edge("write_chapter", "assemble_chapters")
+builder.add_edge("assemble_chapters", "polish_story")
 builder.add_edge("polish_story", END)
 
 graph = builder.compile()

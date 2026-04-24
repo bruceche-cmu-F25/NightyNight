@@ -422,11 +422,7 @@ def _sse(payload: dict) -> str:
 _PROGRESS_NODES = {
     "plan_story",
     "write_chapter",
-    "verify_facts",
-    "reflect_chapter",
-    "revise_chapter",
-    "iterate_chapter",
-    "advance_chapter",
+    "assemble_chapters",
     "polish_story",
 }
 
@@ -487,8 +483,8 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                 if node_name not in _PROGRESS_NODES:
                     continue
 
-                # Convert 0-based index to 1-based for the frontend.
-                chapter_idx = current_state.get("current_chapter_index")
+                # chapter_index is set per-Send during parallel writes
+                chapter_idx = current_state.get("chapter_index")
                 chapter_num = chapter_idx + 1 if isinstance(chapter_idx, int) else None
 
                 yield _sse({
@@ -496,7 +492,7 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                     "node": node_name,
                     "chapter": chapter_num,
                     "message": current_state.get("status_message", ""),
-                    "forced_chapters": current_state.get("forced_chapters", []),
+                    "forced_chapters": [],
                 })
 
         # Graph complete — await TTS (may already be done by now)
@@ -518,7 +514,7 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                 "event": "done",
                 "final_story": final_story,
                 "audio_url": audio_url,
-                "forced_chapters": current_state.get("forced_chapters", []),
+                "forced_chapters": [],
                 "status_message": current_state.get("status_message", ""),
             })
         else:
