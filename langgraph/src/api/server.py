@@ -11,7 +11,7 @@ from typing import AsyncIterator
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -546,14 +546,16 @@ async def health() -> dict:
 
 @app.get("/ambient/{category}")
 async def ambient_random(category: str):
-    """Return a random audio file from the given ambient category folder."""
-    from fastapi.responses import FileResponse
+    """Redirect to a random audio file from the given ambient category folder.
+
+    Uses RedirectResponse → /sounds/... so the StaticFiles mount handles the
+    actual file transfer, including Range requests (needed for audio seeking).
+    """
     file_path = _pick_ambient_file(category)
     if not file_path:
         raise HTTPException(status_code=404, detail=f"No audio files found for category: {category}")
-    suffix = Path(file_path).suffix.lower()
-    media_type = "audio/wav" if suffix == ".wav" else "audio/mpeg"
-    return FileResponse(file_path, media_type=media_type)
+    rel = Path(file_path).relative_to(Path(_SOUNDS_DIR))
+    return RedirectResponse(url=f"/sounds/{rel}", status_code=302)
 
 
 @app.post("/index")

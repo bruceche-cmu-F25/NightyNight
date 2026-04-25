@@ -24,13 +24,14 @@ const BG_MODES: { mode: BackgroundMode; label: string }[] = [
   { mode: 'stars',  label: '✦ Stars'  },
   { mode: 'aurora', label: '◈ Aurora' },
   { mode: 'dreamy', label: '✿ Dreamy' },
+  { mode: 'galaxy', label: '✧ Galaxy' },
 ]
 
-const CHILDREN_AUDIENCES = new Set([
-  'children (ages 4–6)',
-  'children (ages 7–12)',
-  'children (ages 13+)',
-])
+const AUDIENCE_BG: Record<string, BackgroundMode> = {
+  'children (ages 4–6)':  'dreamy',
+  'children (ages 7–12)': 'galaxy',
+  'children (ages 13+)':  'galaxy',
+}
 
 const THEME = THEMES.default
 
@@ -52,7 +53,7 @@ export default function App() {
 
   // Auto-switch background when audience changes
   useEffect(() => {
-    setBgMode(CHILDREN_AUDIENCES.has(settings.audience) ? 'dreamy' : 'stars')
+    setBgMode(AUDIENCE_BG[settings.audience] ?? 'stars')
   }, [settings.audience])
 
   const handleGenerate = useCallback(async () => {
@@ -107,8 +108,9 @@ export default function App() {
   }
 
   return (
-    <div className="root" style={{ background: bgMode === 'dreamy'
-      ? 'radial-gradient(ellipse at 50% 70%, #1a1235 0%, #0e0a24 55%, #07051a 100%)'
+    <div className="root" style={{ background:
+        bgMode === 'dreamy' ? 'radial-gradient(ellipse at 50% 70%, #1a1235 0%, #0e0a24 55%, #07051a 100%)'
+      : bgMode === 'galaxy' ? 'radial-gradient(ellipse at 50% 80%, #0a0d2a 0%, #060818 55%, #020510 100%)'
       : THEME.bg }}>
       <StarField theme={THEME} mode={bgMode} />
       <AmbientPlayer accent={THEME.accentColor} />
