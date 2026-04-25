@@ -183,7 +183,7 @@ html, body, #root {
 
 .story-header {
   display: flex;
-  justify-content: flex-start;
+  justify-content: space-between;
 }
 
 .back-btn {

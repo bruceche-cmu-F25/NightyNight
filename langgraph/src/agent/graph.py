@@ -19,6 +19,12 @@ from langgraph.types import Send
 from pymilvus import connections, utility
 from typing_extensions import TypedDict
 
+from agent.prompts import (
+    select_chapter_prompt,
+    select_plan_prompt,
+    select_polish_prompt,
+)
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -90,16 +96,44 @@ _DURATION_TO_CHAPTERS = [
     (25,  6),
 ]
 
+# Per-audience words-per-minute cap.
+# Young children need shorter chapters regardless of duration setting.
+_AUDIENCE_WPM: dict[str, int] = {
+    "children (ages 4–6)":  65,   # ~500 words / chapter max
+    "children (ages 7–12)": 95,
+    "children (ages 13+)":  115,
+}
+_DEFAULT_WPM = 135
 
-def derive_story_params(duration_min: int) -> tuple[int, int, int]:
+_AUDIENCE_MAX_WORDS_PER_CHAPTER: dict[str, int] = {
+    "children (ages 4–6)":  650,
+    "children (ages 7–12)": 1000,
+}
+
+
+def _cap_words_per_chapter(audience: str, words: int) -> int:
+    cap = _AUDIENCE_MAX_WORDS_PER_CHAPTER.get(audience)
+    return min(words, cap) if cap else words
+
+# Young children also get fewer chapters so each stays simple.
+_AUDIENCE_MAX_CHAPTERS: dict[str, int] = {
+    "children (ages 4–6)":  4,
+    "children (ages 7–12)": 5,
+}
+
+
+def derive_story_params(duration_min: int, audience: str = "") -> tuple[int, int, int]:
     """Return (num_chapters, target_total_words, words_per_chapter) for a given duration."""
-    num_chapters = _DURATION_TO_CHAPTERS[-1][1]
+    wpm = _AUDIENCE_WPM.get(audience, _DEFAULT_WPM)
+    max_ch = _AUDIENCE_MAX_CHAPTERS.get(audience, _DURATION_TO_CHAPTERS[-1][1])
+
+    num_chapters = min(max_ch, _DURATION_TO_CHAPTERS[-1][1])
     for threshold, chapters in _DURATION_TO_CHAPTERS:
         if duration_min <= threshold:
-            num_chapters = chapters
+            num_chapters = min(max_ch, chapters)
             break
 
-    target_total_words = duration_min * _WORDS_PER_MIN
+    target_total_words = duration_min * wpm
     words_per_chapter = target_total_words // num_chapters
     return num_chapters, target_total_words, words_per_chapter
 
@@ -141,160 +175,6 @@ def _parse_chapter_plans(raw: str, expected_count: int) -> list[ChapterPlan]:
             raise ValueError(f"Chapter {i + 1} has an empty or non-string 'summary': {item!r}")
 
     return [ChapterPlan(title=c["title"], summary=c["summary"]) for c in data]
-
-
-# ── SECTION 3: Prompts ────────────────────────────────────────────────────────
-
-PLAN_PROMPT = """\
-#Role: You are a science educator and narrative producer creating structured \
-outlines for an evening science podcast. Your content is calm and accessible, \
-but always grounded in real science — not just atmosphere.
-
-#Task: Create a {num_chapters}-chapter story outline for a bedtime science story.
-
-#Topic: {topic}
-
-#Context:
-  Domain: {domain}
-  Target audience: {audience}
-  Narration style: {style}
-  Target duration: {duration_min} minutes (~{target_total_words} words total)
-  Words per chapter: ~{words_per_chapter}
-
-#Format: Return ONLY a valid JSON array with exactly {num_chapters} objects. \
-No markdown fences, no extra text, no commentary.
-[
-  {{"title": "...", "summary": "..."}},
-  ...
-]
-Each "summary" must name the specific scientific concept or fact that chapter covers — \
-not just a mood or atmosphere.
-
-#Tone / Style: {style} — calm and accessible, but substantive. \
-The listener should feel at ease AND come away having genuinely learned something.
-
-#Goal: An outline where each chapter has a clear educational payload \
-delivered at a pace that does not disrupt sleep — paced for {duration_min} minutes.
-
-#Requirements / Constraints:
-- Distribute the narrative arc evenly across exactly {num_chapters} chapters:
-  * First chapter: a grounded, relatable entry point that names the topic concretely
-  * Middle chapters: each must cover a distinct, named scientific concept or mechanism
-  * Second-to-last chapter: the most significant fact or discovery — stated precisely
-  * Final chapter: a reflective close that links the science back to everyday human experience
-- Each chapter summary must specify what the listener will learn, not just how it will feel
-- Do not use "Chapter 1", "Chapter 2" etc. as titles — use clear, descriptive prose titles
-- Each chapter summary should be distinct and non-overlapping in scientific content
-- Each chapter should sustain approximately {words_per_chapter} words of narration
-"""
-
-WRITE_CHAPTER_PROMPT = """\
-#Role: You are a science narrator with dual expertise: you understand the \
-science deeply, and you know how to explain it in a calm, unhurried way \
-that is pleasant to listen to while drifting toward sleep.
-
-#Task: Write chapter {chapter_num} of {num_chapters} of the story.
-
-#Topic: The story is about "{topic}" (domain: {domain}).
-
-#Full Story Outline (for narrative awareness — do NOT skip ahead or behind):
-{full_outline}
-
-#This Chapter:
-  Title: {title}
-  Focus: {summary}
-  Target audience: {audience}
-
-#Format: Plain prose only. No title, no headers, no bullet points. \
-Target approximately {words_per_chapter} words \
-(acceptable range: {words_min}–{words_max} words).
-
-#Tone / Style: {style} — warm and unhurried. Short sentences. Natural pauses. \
-Analogies drawn from everyday life to make abstract concepts land clearly.
-
-#Goal: Deliver the scientific content in this chapter's focus area in a way \
-that is genuinely informative AND easy to absorb while relaxed. \
-The listener should remember at least one concrete fact from this chapter.
-
-#Requirements / Constraints:
-Factual content:
-- Each chapter must convey 2–3 real scientific ideas — not just mood or imagery
-- Always describe a phenomenon in plain, everyday language first before naming it
-- Audience-specific language rules for "{audience}":
-  * "curious adults" or "science enthusiasts": you may introduce the technical \
-    name as an optional label after the plain description
-  * "general public": skip technical names entirely, stay with plain descriptions
-  * "children (ages 4–6)": use only the simplest words a kindergartner knows; \
-    one idea per sentence; rely entirely on familiar analogies (toys, food, animals); \
-    no technical names at all; sentences must be very short
-  * "children (ages 7–12)": use clear, everyday language; one idea per sentence; \
-    simple analogies; introduce one easy technical term per chapter at most, \
-    always explained immediately in plain words; keep wonder and curiosity front and center
-  * "children (ages 13+)": treat like "general public" but add more wonder and \
-    narrative energy; one or two technical terms per chapter are fine if explained clearly
-- Do not invent specific numbers, percentages, or historical lab procedures; \
-  use scale instead ("millions of years", "a few degrees warmer", "roughly half")
-- Analogies and atmosphere should serve the science, not replace it
-
-Audio / narration quality:
-- Write for listening, not reading — a listener cannot re-read a sentence
-- Avoid long nested sentences; break dense cause-and-effect chains into two or three shorter ones
-- Prefer one main idea per paragraph; do not stack two explanations back to back
-- After a technical point, insert a soft transition before moving to the next idea
-- Do not use "firstly", "secondly", "finally", or any list-like transitions
-- Do not include the chapter title in your output
-- Do not end on an exciting cliffhanger — close with a sense of calm continuity
-
-Narrative continuity:
-- Connect naturally to the chapter before and after yours per the outline above
-- Do not overlap scientific content already covered by adjacent chapters
-
-Self-check before finishing — your output MUST:
-✓ Contain 2–3 distinct real scientific facts (not just atmosphere)
-✓ Fall within {words_min}–{words_max} words
-✓ Flow naturally from the preceding chapter and into the next
-✓ End calmly without a cliffhanger
-✗ Do NOT invent specific figures you cannot verify
-✗ Do NOT include the chapter title
-"""
-
-POLISH_PROMPT = """\
-#Role: You are a copy-editor doing a final light pass on a bedtime science \
-story. Your job is surface-level only — you are NOT a rewriter.
-
-#Task: Make minimal edits to improve flow and tonal consistency between \
-chapters. Every scientific fact must survive your edit unchanged.
-
-#Topic: Bedtime science story — scientific accuracy is non-negotiable.
-
-#Format: Return only the lightly edited story text. No title, no chapter \
-labels, no headers, no commentary. Target approximately {target_total_words} words total.
-
-#Tone / Style: Calm, gentle, and contemplative throughout — a single quiet \
-narrator voice. Soften any passage that feels too energetic for bedtime.
-
-#Goal: A seamlessly flowing story where every paragraph still says exactly \
-what it said before — just with smoother joins and a more consistent voice.
-
-#Requirements / Constraints:
-- PERMITTED edits (surface level only):
-  * Add or rephrase a short transition sentence between chapters
-  * Replace a word or short phrase to match the narrator's tone
-  * Break an overly long sentence into two shorter ones
-  * Soften exclamation-style language into calm declarative phrasing
-- FORBIDDEN edits (factual integrity):
-  * Do not merge two sentences that carry different facts
-  * Do not restructure or reorder paragraphs
-  * Do not substitute, rephrase, or reinterpret any scientific claim
-  * Do not introduce any fact, figure, analogy, or implication not already present
-  * Do not delete content — only trim filler words if unavoidable
-- If a passage is already good, leave it exactly as written
-- When in doubt, do less — a slightly rough join is safer than a rewritten fact
-
-<story>
-{joined_chapters}
-</story>
-"""
 
 
 # ── SECTION 4: LLM & Parser ───────────────────────────────────────────────────
@@ -456,15 +336,17 @@ def plan_story(state: StoryState) -> dict:
     logger.info("[plan_story] topic='%s' domain='%s' duration=%dmin",
                 state["topic"], state["domain"], state["duration_min"])
 
+    audience = state["audience"]
     num_chapters, target_total_words, words_per_chapter = derive_story_params(
-        state["duration_min"]
+        state["duration_min"], audience
     )
 
-    chain = PromptTemplate.from_template(PLAN_PROMPT) | generation_llm | parser
+    plan_prompt = select_plan_prompt(audience)
+    chain = PromptTemplate.from_template(plan_prompt) | generation_llm | parser
     raw = chain.invoke({
         "topic": state["topic"],
         "domain": state["domain"],
-        "audience": state["audience"],
+        "audience": audience,
         "style": state["style"],
         "duration_min": state["duration_min"],
         "num_chapters": num_chapters,
@@ -506,8 +388,9 @@ def write_chapter(state: dict) -> dict:
         for i, p in enumerate(plans)
     )
 
-    target = state["words_per_chapter"]
-    chain = PromptTemplate.from_template(WRITE_CHAPTER_PROMPT) | generation_llm | parser
+    target = _cap_words_per_chapter(state["audience"], state["words_per_chapter"])
+    chapter_prompt = select_chapter_prompt(state["audience"])
+    chain = PromptTemplate.from_template(chapter_prompt) | generation_llm | parser
     draft = chain.invoke({
         "chapter_num": idx + 1,
         "num_chapters": num,
@@ -551,7 +434,7 @@ def polish_story(state: StoryState) -> dict:
                 len(state["completed_chapters"]))
     joined = "\n\n".join(state["completed_chapters"])
 
-    chain = PromptTemplate.from_template(POLISH_PROMPT) | generation_llm | parser
+    chain = PromptTemplate.from_template(select_polish_prompt(state["audience"])) | generation_llm | parser
     polished = chain.invoke({
         "joined_chapters": joined,
         "target_total_words": state["target_total_words"],

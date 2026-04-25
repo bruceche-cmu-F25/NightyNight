@@ -208,6 +208,20 @@ export default function App() {
           <div className="story-view fade-in">
             <div className="story-header">
               <button className="back-btn" onClick={handleReset}>← New story</button>
+              <button
+                className="back-btn"
+                onClick={() => {
+                  const blob = new Blob([story], { type: 'text/plain' })
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `${topic.trim().replace(/\s+/g, '_') || 'story'}.txt`
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }}
+              >
+                ↓ Download
+              </button>
             </div>
 
             {audioUrl && (

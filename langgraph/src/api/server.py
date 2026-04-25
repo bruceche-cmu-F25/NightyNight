@@ -233,7 +233,15 @@ ELEVENLABS_VOICES: dict[str, str] = {
 }
 
 
-def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str) -> tuple[int, "AudioSegment"]:
+_AUDIENCE_SPEED: dict[str, float] = {
+    "children (ages 4–6)":  0.70,
+    "children (ages 7–12)": 0.75,
+    "children (ages 13+)":  0.79,
+}
+_DEFAULT_SPEED = 0.82
+
+
+def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, "AudioSegment"]:
     """Synthesize a single text chunk via ElevenLabs TTS.
 
     ElevenLabs produces highly natural, emotionally consistent narration — well-suited
@@ -257,7 +265,7 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str) -> tupl
             "similarity_boost": 0.80,
             "style": 0.05,
             "use_speaker_boost": True,
-            "speed": 0.82,   # ~18% slower — more breathing room for bedtime listening
+            "speed": speed,
         },
     }
 
@@ -284,6 +292,7 @@ def _synthesize_blocking(
     ambient: str,
     ambient_db: float,
     out_path: str,
+    audience: str = "",
 ) -> tuple[int, int]:
     """Synthesize story text via Gemini TTS, optionally mix ambient sound.
 
@@ -295,14 +304,15 @@ def _synthesize_blocking(
     from pydub import AudioSegment
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
+    speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
     chunk_tuples = _chunk_text(story_text, max_chars=4000)
-    logger.info("TTS: synthesizing %d chunks in parallel", len(chunk_tuples))
+    logger.info("TTS: synthesizing %d chunks in parallel (speed=%.2f)", len(chunk_tuples), speed)
 
     # Synthesize all chunks in parallel; each item is (text, is_chapter_boundary)
     results: dict[int, AudioSegment] = {}
     with ThreadPoolExecutor(max_workers=min(len(chunk_tuples), 2)) as pool:
         futures = {
-            pool.submit(_synthesize_chunk, i, text, voice_name, api_key): i
+            pool.submit(_synthesize_chunk, i, text, voice_name, api_key, speed): i
             for i, (text, _) in enumerate(chunk_tuples)
         }
         for future in as_completed(futures):
@@ -474,7 +484,7 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                             synthesis_future = loop.run_in_executor(
                                 None, _synthesize_blocking,
                                 polished, request.voice, resolved_ambient,
-                                request.ambient_db, audio_out,
+                                request.ambient_db, audio_out, request.audience,
                             )
                             logger.info("TTS synthesis started in background (parallel chunks).")
                         else:
