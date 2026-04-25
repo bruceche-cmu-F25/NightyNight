@@ -544,6 +544,18 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/ambient/{category}")
+async def ambient_random(category: str):
+    """Return a random audio file from the given ambient category folder."""
+    from fastapi.responses import FileResponse
+    file_path = _pick_ambient_file(category)
+    if not file_path:
+        raise HTTPException(status_code=404, detail=f"No audio files found for category: {category}")
+    suffix = Path(file_path).suffix.lower()
+    media_type = "audio/wav" if suffix == ".wav" else "audio/mpeg"
+    return FileResponse(file_path, media_type=media_type)
+
+
 @app.post("/index")
 async def index(drop_old: bool = False) -> JSONResponse:
     """Scan sources/ PDFs and (re-)index them into Milvus.

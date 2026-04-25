@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 
 const SOUNDS = [
-  { label: 'Rain',   icon: '🌧', file: '/sounds/rain/Light rain recordings mixed settings-01.wav' },
-  { label: 'Ocean',  icon: '🌊', file: '/sounds/ocean/ocean01.mp3' },
-  { label: 'Fire',   icon: '🔥', file: '/sounds/fire/fire01.mp3' },
-  { label: 'Woods',  icon: '🌲', file: '/sounds/woods/woods01.mp3' },
-  { label: 'Cosmos', icon: '🌌', file: '/sounds/cosmos/cosmos01.wav' },
+  { label: 'Rain',   icon: '🌧', category: 'rain'   },
+  { label: 'Ocean',  icon: '🌊', category: 'ocean'  },
+  { label: 'Fire',   icon: '🔥', category: 'fire'   },
+  { label: 'Woods',  icon: '🌲', category: 'woods'  },
+  { label: 'Cosmos', icon: '🌌', category: 'cosmos' },
 ]
 
 interface Props { accent: string }
@@ -37,14 +37,15 @@ export default function AmbientPlayer({ accent }: Props) {
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  const play = (label: string, file: string) => {
+  const play = (label: string, category: string) => {
     const a = audioRef.current!
     if (selected === label) {
       // toggle play/pause
       if (playing) { a.pause(); setPlaying(false) }
       else         { a.play(); setPlaying(true) }
     } else {
-      a.src = file
+      // fresh URL each time → backend picks a random file from the category
+      a.src = `/ambient/${category}`
       a.volume = volume
       a.play().then(() => setPlaying(true)).catch(() => {})
       setSelected(label)
@@ -78,7 +79,7 @@ export default function AmbientPlayer({ accent }: Props) {
               <button
                 key={s.label}
                 className={`ambient-row ${isPlaying(s.label) ? 'ambient-row--active' : ''}`}
-                onClick={() => play(s.label, s.file)}
+                onClick={() => play(s.label, s.category)}
               >
                 <span className="ambient-row-icon">{s.icon}</span>
                 <span className="ambient-row-label">{s.label}</span>

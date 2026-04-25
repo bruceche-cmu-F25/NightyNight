@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import StarField, { BackgroundMode } from './StarField'
 import SettingsDrawer, { Settings } from './SettingsDrawer'
 import AmbientPlayer from './AmbientPlayer'
@@ -23,7 +23,14 @@ const DEFAULT_SETTINGS: Settings = {
 const BG_MODES: { mode: BackgroundMode; label: string }[] = [
   { mode: 'stars',  label: '✦ Stars'  },
   { mode: 'aurora', label: '◈ Aurora' },
+  { mode: 'dreamy', label: '✿ Dreamy' },
 ]
+
+const CHILDREN_AUDIENCES = new Set([
+  'children (ages 4–6)',
+  'children (ages 7–12)',
+  'children (ages 13+)',
+])
 
 const THEME = THEMES.default
 
@@ -42,6 +49,11 @@ export default function App() {
   const [errorMsg,     setErrorMsg]     = useState('')
 
   const abortRef = useRef<AbortController | null>(null)
+
+  // Auto-switch background when audience changes
+  useEffect(() => {
+    setBgMode(CHILDREN_AUDIENCES.has(settings.audience) ? 'dreamy' : 'stars')
+  }, [settings.audience])
 
   const handleGenerate = useCallback(async () => {
     if (!topic.trim()) return
@@ -95,7 +107,9 @@ export default function App() {
   }
 
   return (
-    <div className="root" style={{ background: THEME.bg }}>
+    <div className="root" style={{ background: bgMode === 'dreamy'
+      ? 'radial-gradient(ellipse at 50% 70%, #1a1235 0%, #0e0a24 55%, #07051a 100%)'
+      : THEME.bg }}>
       <StarField theme={THEME} mode={bgMode} />
       <AmbientPlayer accent={THEME.accentColor} />
 

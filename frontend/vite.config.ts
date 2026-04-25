@@ -9,6 +9,7 @@ export default defineConfig({
       '/generate': 'http://localhost:8000',
       '/audio':    'http://localhost:8000',
       '/sounds':   'http://localhost:8000',
+      '/ambient':  'http://localhost:8000',
     },
   },
 })
