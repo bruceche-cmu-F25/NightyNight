@@ -318,7 +318,7 @@ export default function StarField({ theme, mode }: Props) {
       '#f0d0e0',  // faint pink
     ]
 
-    const particles = Array.from({ length: 1000 }, () => ({
+    const particles = Array.from({ length: 300 }, () => ({
       x:     Math.random() * canvas.width,
       y:     Math.random() * canvas.height,
       vx:    (Math.random() - 0.5) * 0.12,
