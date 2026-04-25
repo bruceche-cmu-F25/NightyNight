@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       '/generate': 'http://localhost:8000',
       '/audio':    'http://localhost:8000',
+      '/sounds':   'http://localhost:8000',
     },
   },
 })

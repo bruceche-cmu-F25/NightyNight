@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback } from 'react'
 import StarField, { BackgroundMode } from './StarField'
 import SettingsDrawer, { Settings } from './SettingsDrawer'
+import AmbientPlayer from './AmbientPlayer'
 import { THEMES } from './theme'
 import { streamGenerate, NODE_PROGRESS, GenerateRequest } from './api'
 
@@ -96,6 +97,7 @@ export default function App() {
   return (
     <div className="root" style={{ background: THEME.bg }}>
       <StarField theme={THEME} mode={bgMode} />
+      <AmbientPlayer accent={THEME.accentColor} />
 
       <SettingsDrawer
         open={settingsOpen}
@@ -219,6 +221,7 @@ export default function App() {
                 <p key={i}>{para}</p>
               ))}
             </article>
+
           </div>
         )}
 

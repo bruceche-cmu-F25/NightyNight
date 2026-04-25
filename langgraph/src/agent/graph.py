@@ -220,10 +220,18 @@ The listener should remember at least one concrete fact from this chapter.
 Factual content:
 - Each chapter must convey 2–3 real scientific ideas — not just mood or imagery
 - Always describe a phenomenon in plain, everyday language first before naming it
-- For a "{audience}" audience: if the audience is "curious adults" or \
-  "science enthusiasts", you may introduce the technical name as an optional \
-  label after the plain description; if the audience is "general public", \
-  skip technical names entirely
+- Audience-specific language rules for "{audience}":
+  * "curious adults" or "science enthusiasts": you may introduce the technical \
+    name as an optional label after the plain description
+  * "general public": skip technical names entirely, stay with plain descriptions
+  * "children (ages 4–6)": use only the simplest words a kindergartner knows; \
+    one idea per sentence; rely entirely on familiar analogies (toys, food, animals); \
+    no technical names at all; sentences must be very short
+  * "children (ages 7–12)": use clear, everyday language; one idea per sentence; \
+    simple analogies; introduce one easy technical term per chapter at most, \
+    always explained immediately in plain words; keep wonder and curiosity front and center
+  * "children (ages 13+)": treat like "general public" but add more wonder and \
+    narrative energy; one or two technical terms per chapter are fine if explained clearly
 - Do not invent specific numbers, percentages, or historical lab procedures; \
   use scale instead ("millions of years", "a few degrees warmer", "roughly half")
 - Analogies and atmosphere should serve the science, not replace it

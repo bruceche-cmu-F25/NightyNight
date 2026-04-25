@@ -15,7 +15,14 @@ interface Props {
 }
 
 const AMBIENT_OPTIONS  = ['auto', 'fire', 'rain', 'ocean', 'woods', 'cosmos', 'none']
-const AUDIENCE_OPTIONS = ['curious adults', 'science enthusiasts', 'general public']
+const AUDIENCE_OPTIONS = [
+  'curious adults',
+  'science enthusiasts',
+  'general public',
+  'children (ages 4–6)',
+  'children (ages 7–12)',
+  'children (ages 13+)',
+]
 const STYLE_OPTIONS    = ['gentle bedtime', 'calm documentary', 'soft storytelling']
 
 export default function SettingsDrawer({ open, settings, onChange, onClose, accent }: Props) {

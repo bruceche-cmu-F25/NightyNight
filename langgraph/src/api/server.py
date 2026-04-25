@@ -113,7 +113,7 @@ app.add_middleware(
 AUDIO_DIR = os.environ.get("AUDIO_DIR", "/tmp/counting_stars_audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
-# app.mount("/sounds", StaticFiles(directory=_SOUNDS_DIR), name="sounds")
+app.mount("/sounds", StaticFiles(directory=_SOUNDS_DIR), name="sounds")
 
 
 # ── TTS helpers ───────────────────────────────────────────────────────────────
