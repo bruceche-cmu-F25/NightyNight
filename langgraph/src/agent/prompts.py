@@ -369,3 +369,22 @@ def select_polish_prompt(audience: str) -> str:
     if audience == "children (ages 4–6)":
         return POLISH_PROMPT_4_6
     return POLISH_PROMPT
+
+
+# ── StoryGuard revision ───────────────────────────────────────────────────────
+
+REVISION_PROMPT = """\
+#Role: You are revising a bedtime science story.
+
+#Target audience:
+{audience}
+
+#Revision instruction:
+{revision_instruction}
+
+#Original story:
+{story}
+
+#Format:
+Return only the revised story text. No title, no headers, no commentary.\
+"""

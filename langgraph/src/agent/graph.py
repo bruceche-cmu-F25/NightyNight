@@ -8,6 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional, Tuple
 
+import joblib
+import numpy as np
+import pandas as pd
 from dotenv import load_dotenv
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
@@ -20,6 +23,7 @@ from pymilvus import connections, utility
 from typing_extensions import TypedDict
 
 from agent.prompts import (
+    REVISION_PROMPT,
     select_chapter_prompt,
     select_plan_prompt,
     select_polish_prompt,
@@ -81,6 +85,16 @@ class StoryState(_StoryStateRequired, total=False):
     final_story: Optional[str]         # set by polish_story
     # Annotated with last-wins reducer — parallel write_chapter nodes all emit this
     status_message: Annotated[Optional[str], lambda _, b: b]
+
+    # ── StoryGuard fields (set by storyguard / revision nodes) ──
+    guard_result: dict           # full output of predict_suitable_4_6 (4-6 path)
+    age_diagnosis: dict          # full output of predict_age_group
+    predicted_age_group: str     # "4-6" | "7-12" | "13+"
+    guard_passed: bool           # True if story matches target audience
+    revision_instruction: str    # built by build_revision_instruction
+    revision_count: int          # how many revision loops have run
+    max_revisions: int           # max retry attempts before giving up (default 2)
+    final_status: str            # "accepted" | "accepted_non_child" | "max_revisions_reached"
 
 
 # ── SECTION 2: Duration → Story Parameter Helper ─────────────────────────────
@@ -175,6 +189,219 @@ def _parse_chapter_plans(raw: str, expected_count: int) -> list[ChapterPlan]:
             raise ValueError(f"Chapter {i + 1} has an empty or non-string 'summary': {item!r}")
 
     return [ChapterPlan(title=c["title"], summary=c["summary"]) for c in data]
+
+
+# ── SECTION 3: StoryGuard — Feature Extraction & Models ─────────────────────
+
+# Audiences that require age-suitability checking after generation
+_CHILD_AUDIENCES = {
+    "children (ages 4–6)",
+    "children (ages 7–12)",
+    "children (ages 13+)",
+}
+
+# Model files are saved by the notebook into notebooks/ at the project root.
+# Override via env var STORYGUARD_MODEL_DIR if you move them.
+# graph.py is at: project/langgraph/src/agent/graph.py
+# parents[3]    = project root (CountingStars/)
+_MODEL_DIR = Path(
+    os.getenv(
+        "STORYGUARD_MODEL_DIR",
+        str(Path(__file__).resolve().parents[3] / "notebooks"),
+    )
+)
+logger.info("StoryGuard model dir: %s", _MODEL_DIR)
+
+_TEXT_FEATURES = [
+    "log_word_count", "sentence_count", "avg_sentence_length",
+    "avg_word_length", "unique_word_ratio", "exclamation_ratio",
+    "question_ratio", "flesch_score",
+]
+
+
+def _load_model(filename: str):
+    path = _MODEL_DIR / filename
+    if not path.exists():
+        logger.warning("StoryGuard model not found: %s — will use heuristic fallback", path)
+        return None
+    try:
+        model = joblib.load(path)
+        logger.info("StoryGuard loaded: %s", filename)
+        return model
+    except Exception as exc:
+        logger.warning(
+            "StoryGuard model %s failed to load (sklearn version mismatch?): %s — "
+            "falling back to heuristics. Re-save with the server's sklearn version to fix.",
+            filename, exc,
+        )
+        return None
+
+
+# Binary 4-6 suitability model (Gradient Boosting — no scaler needed)
+_sg_suitable_4_6_model = _load_model("child_friendly_gb.joblib")
+
+# Multiclass age group model (Gradient Boosting — no scaler needed)
+_sg_multi_model = _load_model("age_group_gb.joblib")
+
+_sg_id_to_age = {0: "4-6", 1: "7-12", 2: "13+"}
+
+
+# ── Rule-based safety guard ───────────────────────────────────────────────────
+
+_SCARY_WORDS = {
+    "haunted", "ghost", "shadow", "midnight", "fear",
+    "scary", "monster", "scream", "horror", "demon", "curse",
+}
+_VIOLENCE_WORDS = {
+    "war", "soldier", "battlefield", "weapon", "gun", "fight",
+    "ruin", "despair", "ash", "kill", "attack", "blood", "death",
+    "murder", "corpse", "artillery", "casualties",
+}
+
+
+def rule_based_guard(text: str) -> tuple[bool, str]:
+    """
+    First-pass keyword safety filter for all child audiences.
+    Returns (passed: bool, reason: str).
+    """
+    words         = set(re.findall(r"[a-zA-Z]+", text.lower()))
+    violence_hits = words & _VIOLENCE_WORDS
+    scary_hits    = words & _SCARY_WORDS
+    if violence_hits:
+        return False, f"Rejected by safety rule: violence-related words {violence_hits}"
+    if len(scary_hits) >= 2:
+        return False, f"Rejected by safety rule: scary content {scary_hits}"
+    return True, "Passed rule-based safety check"
+
+
+# ── Feature helpers (mirror of notebook Section 4) ───────────────────────────
+
+def _sg_clean_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r"\s+", " ", text.strip())
+
+
+def _sg_count_sentences(text: str) -> int:
+    parts = re.split(r"[.!?]+", text)
+    return max(len([p for p in parts if p.strip()]), 1)
+
+
+def _sg_extract_words(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Z]+", text.lower())
+
+
+def _sg_approx_syllables(word: str) -> int:
+    return max(len(re.findall(r"[aeiouy]+", word.lower())), 1)
+
+
+def _sg_flesch(text: str) -> float:
+    words = _sg_extract_words(text)
+    n_w = max(len(words), 1)
+    n_s = _sg_count_sentences(text)
+    n_syl = sum(_sg_approx_syllables(w) for w in words)
+    return round(206.835 - 1.015 * (n_w / n_s) - 84.6 * (n_syl / n_w), 2)
+
+
+def _sg_extract_features(text: str) -> dict:
+    words = _sg_extract_words(text)
+    n_w = max(len(words), 1)
+    n_s = _sg_count_sentences(text)
+    lengths = [len(w) for w in words]
+    return {
+        "log_word_count":      round(np.log1p(n_w), 4),
+        "sentence_count":      n_s,
+        "avg_sentence_length": round(n_w / n_s, 2),
+        "avg_word_length":     round(float(np.mean(lengths)), 2),
+        "unique_word_ratio":   round(len(set(words)) / n_w, 2),
+        "exclamation_ratio":   round(text.count("!") / n_w, 4),
+        "question_ratio":      round(text.count("?") / n_w, 4),
+        "flesch_score":        _sg_flesch(text),
+        "raw_word_count":      n_w,
+    }
+
+
+def _sg_feature_matrix(features: dict) -> np.ndarray:
+    """Convert feature dict → (1, 8) numpy array in correct column order."""
+    return pd.DataFrame([features])[_TEXT_FEATURES].values
+
+
+# ── Prediction helpers ────────────────────────────────────────────────────────
+
+def predict_suitable_4_6(story_text: str) -> dict:
+    """
+    Binary check: is this story suitable for ages 4–6?
+    Uses Gradient Boosting trained on age_group == '4-6' label.
+    Falls back to readability heuristic if model unavailable.
+    Returns suitable_4_6 (bool), confidence (float), and features.
+    """
+    text     = _sg_clean_text(story_text)
+    features = _sg_extract_features(text)
+
+    if _sg_suitable_4_6_model is None:
+        suitable = features["flesch_score"] >= 70 and features["avg_word_length"] <= 4.5
+        return {
+            "suitable_4_6":               suitable,
+            "confidence":                 0.6,
+            "ml_probability_suitable_4_6": None,
+            "features":                   features,
+            "fallback":                   True,
+        }
+
+    X    = _sg_feature_matrix(features)
+    label = int(_sg_suitable_4_6_model.predict(X)[0])
+    prob  = float(_sg_suitable_4_6_model.predict_proba(X)[0][1])
+
+    predicted_suitable = label == 1
+    confidence         = prob if predicted_suitable else (1 - prob)
+
+    # Readability override: very easy text → suitable
+    if features["flesch_score"] >= 80 and features["avg_word_length"] <= 4.5:
+        return {
+            "suitable_4_6":               True,
+            "confidence":                 round(max(confidence, 0.75), 3),
+            "ml_probability_suitable_4_6": round(prob, 3),
+            "features":                   features,
+            "readability_override":       True,
+        }
+
+    return {
+        "suitable_4_6":               predicted_suitable,
+        "confidence":                 round(confidence, 3),
+        "ml_probability_suitable_4_6": round(prob, 3),
+        "features":                   features,
+        "readability_override":       False,
+    }
+
+
+def predict_age_group(story_text: str) -> dict:
+    """
+    Multiclass age group prediction: '4-6' | '7-12' | '13+'.
+    Uses Gradient Boosting multiclass model.
+    Falls back to Flesch score heuristic if model unavailable.
+    """
+    text     = _sg_clean_text(story_text)
+    features = _sg_extract_features(text)
+
+    if _sg_multi_model is None:
+        flesch = features["flesch_score"]
+        predicted = "4-6" if flesch >= 70 else ("7-12" if flesch >= 50 else "13+")
+        return {
+            "predicted_age": predicted,
+            "probabilities": {"4-6": 0.0, "7-12": 0.0, "13+": 0.0},
+            "features":      features,
+            "fallback":      True,
+        }
+
+    X        = _sg_feature_matrix(features)
+    pred_idx = int(_sg_multi_model.predict(X)[0])
+    probs    = _sg_multi_model.predict_proba(X)[0]
+    return {
+        "predicted_age": _sg_id_to_age[pred_idx],
+        "probabilities": {_sg_id_to_age[i]: round(float(p), 3) for i, p in enumerate(probs)},
+        "features":      features,
+        "fallback":      False,
+    }
 
 
 # ── SECTION 4: LLM & Parser ───────────────────────────────────────────────────
@@ -447,6 +674,218 @@ def polish_story(state: StoryState) -> dict:
     }
 
 
+# ── StoryGuard Nodes ─────────────────────────────────────────────────────────
+
+def _failed_status(state: StoryState) -> str:
+    """Return 'max_revisions_reached' if retries are exhausted, else 'needs_revision'."""
+    return (
+        "max_revisions_reached"
+        if state.get("revision_count", 0) >= state.get("max_revisions", 2)
+        else "needs_revision"
+    )
+
+
+def storyguard_check(state: StoryState) -> dict:
+    """
+    Check whether the polished story matches the target audience.
+
+    - ages 4–6  → binary suitable_4_6 model (GB), then multiclass if needed
+    - ages 7–12 → multiclass: predicted_age == "7-12"?
+    - ages 13+  → multiclass: predicted_age == "13+"?
+    - non-child → skip, pass immediately
+    """
+    audience = state["audience"]
+    story    = state["final_story"]
+
+    if audience not in _CHILD_AUDIENCES:
+        logger.info("[storyguard_check] non-child audience — skipping guard")
+        return {
+            "guard_passed": True,
+            "final_status": "accepted_non_child",
+            "status_message": "StoryGuard skipped for non-child audience.",
+        }
+
+    # Layer 1: rule-based safety check for all child audiences
+    safety_passed, safety_reason = rule_based_guard(story)
+    if not safety_passed:
+        logger.info("[storyguard_check] safety rule failed: %s", safety_reason)
+        return {
+            "guard_passed":  False,
+            "final_status":  _failed_status(state),
+            "guard_result":  {"safety_passed": False, "reason": safety_reason},
+            "status_message": safety_reason,
+        }
+
+    if audience == "children (ages 4–6)":
+        result = predict_suitable_4_6(story)
+        passed = result["suitable_4_6"]
+        logger.info("[storyguard_check] 4-6 binary: passed=%s conf=%.2f",
+                    passed, result["confidence"])
+        return {
+            "guard_result":  result,
+            "guard_passed":  passed,
+            "final_status":  "accepted" if passed else _failed_status(state),
+            "status_message": (
+                f"StoryGuard 4–6 binary: {'PASS' if passed else 'FAIL'} "
+                f"(conf={result['confidence']:.2f})"
+            ),
+        }
+
+    # 7-12 or 13+: use multiclass
+    target     = "7-12" if audience == "children (ages 7–12)" else "13+"
+    age_result = predict_age_group(story)
+    predicted  = age_result["predicted_age"]
+    passed     = predicted == target
+    logger.info("[storyguard_check] multiclass: predicted=%s target=%s passed=%s",
+                predicted, target, passed)
+    return {
+        "age_diagnosis":       age_result,
+        "predicted_age_group": predicted,
+        "guard_passed":        passed,
+        "final_status":        "accepted" if passed else _failed_status(state),
+        "status_message": (
+            f"StoryGuard multiclass: predicted={predicted} target={target} "
+            f"{'PASS' if passed else 'FAIL'}"
+        ),
+    }
+
+
+def diagnose_age(state: StoryState) -> dict:
+    """
+    Run the multiclass age model to find out which age group the story looks like.
+    Only needed for the 4–6 path (7-12/13+ already have age_diagnosis from storyguard_check).
+    """
+    if state.get("age_diagnosis"):
+        return {}  # already diagnosed in storyguard_check
+
+    result   = predict_age_group(state["final_story"])
+    predicted = result["predicted_age"]
+    logger.info("[diagnose_age] story looks like age group: %s", predicted)
+    return {
+        "age_diagnosis":      result,
+        "predicted_age_group": predicted,
+        "status_message": f"Age diagnosis: story reads like ages {predicted}.",
+    }
+
+
+def build_revision_instruction(state: StoryState) -> dict:
+    """Build a targeted LLM revision instruction based on target vs. predicted age group."""
+    audience  = state["audience"]
+    predicted = state.get("predicted_age_group") or (
+        state.get("age_diagnosis", {}).get("predicted_age")
+    )
+
+    if audience == "children (ages 4–6)":
+        if predicted == "7-12":
+            instruction = (
+                "Revise the story for ages 4–6. "
+                "The current version reads like a 7–12 story — simplify it:\n"
+                "- Use shorter sentences.\n"
+                "- Replace difficult words with everyday ones.\n"
+                "- Reduce explanation density; show through actions and images instead.\n"
+                "- Add gentle repetition and a calm, warm rhythm.\n"
+                "- Keep the same topic and main story arc."
+            )
+        elif predicted == "13+":
+            instruction = (
+                "Rewrite the story for ages 4–6. "
+                "The current version reads like a 13+ story — make a major simplification:\n"
+                "- Use very short sentences (5–8 words each).\n"
+                "- Use only common, concrete words.\n"
+                "- Remove all abstract explanations.\n"
+                "- Keep only 1–2 simple science ideas.\n"
+                "- Explain through actions, colors, sounds, and concrete images.\n"
+                "- Make the story slow, calm, and soothing."
+            )
+        else:
+            instruction = (
+                "Revise the story to better fit ages 4–6:\n"
+                "- Use simpler words and shorter sentences.\n"
+                "- Make it gentle, concrete, and easy to follow."
+            )
+
+    elif audience == "children (ages 7–12)":
+        if predicted == "4-6":
+            instruction = (
+                "Revise the story for ages 7–12. "
+                "The current version is too simple — enrich it slightly:\n"
+                "- Add more scientific detail and cause-and-effect reasoning.\n"
+                "- Use slightly richer vocabulary.\n"
+                "- Reduce overly childish repetition.\n"
+                "- Keep the story clear, friendly, and imaginative."
+            )
+        elif predicted == "13+":
+            instruction = (
+                "Revise the story for ages 7–12. "
+                "The current version is too advanced — simplify it:\n"
+                "- Shorten long sentences.\n"
+                "- Explain or replace advanced terms.\n"
+                "- Reduce abstract language; use concrete examples and simple analogies.\n"
+                "- Keep the science accurate but accessible."
+            )
+        else:
+            instruction = "Revise the story to better fit ages 7–12."
+
+    elif audience == "children (ages 13+)":
+        if predicted == "4-6":
+            instruction = (
+                "Revise the story for ages 13+. "
+                "The current version is too simple — make it more mature:\n"
+                "- Add deeper scientific explanation and precise vocabulary.\n"
+                "- Add richer context, reasoning, and real-world connections.\n"
+                "- Reduce childish repetition.\n"
+                "- Keep the story engaging and clear."
+            )
+        elif predicted == "7-12":
+            instruction = (
+                "Revise the story for ages 13+. "
+                "The current version is slightly too simple — increase depth:\n"
+                "- Add more complex reasoning and precise scientific terms.\n"
+                "- Expand explanations with nuance and real-world connections.\n"
+                "- Maintain the story structure; just raise the intellectual level."
+            )
+        else:
+            instruction = "Revise the story to better fit ages 13+."
+
+    else:
+        instruction = "Improve the story to better match the selected audience."
+
+    logger.info("[build_revision_instruction] target=%s predicted=%s", audience, predicted)
+    return {
+        "revision_instruction": instruction,
+        "status_message": (
+            f"Revision instruction built: target={audience}, predicted={predicted}."
+        ),
+    }
+
+
+def revise_story(state: StoryState) -> dict:
+    """Send the story back to the LLM with a targeted revision instruction."""
+    chain = PromptTemplate.from_template(REVISION_PROMPT) | generation_llm | parser
+    revised = chain.invoke({
+        "audience":             state["audience"],
+        "revision_instruction": state["revision_instruction"],
+        "story":                state["final_story"],
+    }).strip()
+
+    count = state.get("revision_count", 0) + 1
+    logger.info("[revise_story] revision #%d done — %d words", count, len(revised.split()))
+    return {
+        "final_story":    revised,
+        "revision_count": count,
+        "status_message": f"Story revised (attempt {count}).",
+    }
+
+
+def route_after_guard(state: StoryState) -> str:
+    """Route after storyguard_check: accept, retry, or give up."""
+    if state.get("guard_passed"):
+        return "accept"
+    if state.get("revision_count", 0) >= state.get("max_revisions", 2):
+        return "max_revisions_reached"
+    return "diagnose_age"
+
+
 # ── SECTION 6: Dispatch ──────────────────────────────────────────────────────
 
 
@@ -462,10 +901,17 @@ def dispatch_chapters(state: StoryState) -> list[Send]:
 
 builder = StateGraph(StoryState)
 
-builder.add_node("plan_story", plan_story)
-builder.add_node("write_chapter", write_chapter)
-builder.add_node("assemble_chapters", assemble_chapters)
-builder.add_node("polish_story", polish_story)
+# Generation nodes
+builder.add_node("plan_story",         plan_story)
+builder.add_node("write_chapter",      write_chapter)
+builder.add_node("assemble_chapters",  assemble_chapters)
+builder.add_node("polish_story",       polish_story)
+
+# StoryGuard nodes
+builder.add_node("storyguard_check",           storyguard_check)
+builder.add_node("diagnose_age",               diagnose_age)
+builder.add_node("build_revision_instruction", build_revision_instruction)
+builder.add_node("revise_story",               revise_story)
 
 builder.set_entry_point("plan_story")
 
@@ -473,8 +919,26 @@ builder.set_entry_point("plan_story")
 builder.add_conditional_edges("plan_story", dispatch_chapters, ["write_chapter"])
 
 # All write_chapter branches converge at assemble_chapters
-builder.add_edge("write_chapter", "assemble_chapters")
+builder.add_edge("write_chapter",     "assemble_chapters")
 builder.add_edge("assemble_chapters", "polish_story")
-builder.add_edge("polish_story", END)
+
+# polish_story → StoryGuard (instead of END)
+builder.add_edge("polish_story", "storyguard_check")
+
+# storyguard_check → END (pass) | mark_max_revisions | diagnose_age
+builder.add_conditional_edges(
+    "storyguard_check",
+    route_after_guard,
+    {
+        "accept":                END,
+        "max_revisions_reached": END,
+        "diagnose_age":          "diagnose_age",
+    },
+)
+
+# Revision loop: diagnose → build instruction → revise → check again
+builder.add_edge("diagnose_age",               "build_revision_instruction")
+builder.add_edge("build_revision_instruction", "revise_story")
+builder.add_edge("revise_story",               "storyguard_check")
 
 graph = builder.compile()
