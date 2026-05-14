@@ -302,7 +302,7 @@ def _synthesize_blocking(
     Runs synchronously — call via run_in_executor to avoid blocking the event loop.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from pydub import AudioSegment
+    from pydub import AudioSegment, effects as _fx
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
@@ -320,6 +320,10 @@ def _synthesize_blocking(
             idx, seg = future.result()
             results[idx] = seg
             logger.info("TTS: chunk %d/%d done", idx + 1, len(chunk_tuples))
+
+    # Normalize each chunk to consistent loudness before assembly
+    for idx in results:
+        results[idx] = _fx.normalize(results[idx])
 
     # Reassemble in order with crossfade between paragraphs and longer pause at chapters
     _CROSSFADE_MS      = 80    # smooth join between adjacent paragraph chunks
