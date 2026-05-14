@@ -260,9 +260,9 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: 
     url = _ELEVENLABS_TTS_URL.format(voice_id=voice_id)
     payload = {
         "text": chunk,
-        "model_id": "eleven_multilingual_v2",
+        "model_id": "eleven_flash_v2_5",
         "voice_settings": {
-            "stability": 0.75,
+            "stability": 0.88,
             "similarity_boost": 0.80,
             "style": 0.05,
             "use_speaker_boost": True,
@@ -306,7 +306,7 @@ def _synthesize_blocking(
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
-    chunk_tuples = _chunk_text(story_text, max_chars=4000)
+    chunk_tuples = _chunk_text(story_text, max_chars=39000)
     logger.info("TTS: synthesizing %d chunks in parallel (speed=%.2f)", len(chunk_tuples), speed)
 
     # Synthesize all chunks in parallel; each item is (text, is_chapter_boundary)
