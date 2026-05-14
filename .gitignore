@@ -8,5 +8,5 @@ __pycache__/
 dist/
 .env
 /source/*
-/sounds/*
+/sounds/cosmos/cosmos01.wav
 */node_modules
