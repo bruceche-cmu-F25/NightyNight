@@ -10,10 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -r
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-COPY . /app
+COPY langgraph/ /app
+COPY sounds/ /sounds
 
 # Critical: let Python import from src/
 ENV PYTHONPATH=/app/src
+ENV SOUNDS_DIR=/sounds
 
 EXPOSE 8000
 CMD ["uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
