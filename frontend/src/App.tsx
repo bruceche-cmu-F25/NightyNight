@@ -11,6 +11,9 @@ const VOICES: Record<string, string> = {
   'Christopher (gentle)':  'G17SuINrv2H9FC6nvetn',
   'Archer (deep, calm)':   'X0K9Z1Bor9SpbE1wSaoe',
   'Adam Stone (smooth)':   'NFG5qt843uXKj4pFvR7C',
+  'John Doe (deep)':       'EiNlNiXeDU1pqqOPrYMO',
+  'Kyle Manning':          'q8hD3YAFEqLvfbspywun',
+  'True Crime Narrator':   'tZssYepgGaQmegsMEXjK',
   'Autumn Veil (warm ♀)':  'KoVIHoyLDrQyd4pGalbs',
 }
 
