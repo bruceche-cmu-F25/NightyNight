@@ -118,6 +118,32 @@ app.mount("/sounds", StaticFiles(directory=_SOUNDS_DIR), name="sounds")
 
 # ── TTS helpers ───────────────────────────────────────────────────────────────
 
+def _prepare_tts_text(text: str) -> str:
+    """Strip formatting that causes ElevenLabs to shift vocal energy mid-story.
+
+    LLMs sometimes ignore "no headers" instructions. Any structural marker
+    (Chapter headings, markdown bold, horizontal rules) makes ElevenLabs switch
+    to an "announcement" voice that spikes in volume/energy.
+    """
+    # Markdown bold / italic
+    text = re.sub(r'\*{1,3}([^*\n]+)\*{1,3}', r'\1', text)
+    text = re.sub(r'_{1,3}([^_\n]+)_{1,3}', r'\1', text)
+    # ATX headings (# Title)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Horizontal rules (--- / *** / ___)
+    text = re.sub(r'^[-*_]{3,}\s*$', '', text, flags=re.MULTILINE)
+    # Explicit chapter/part/section labels the LLM might still emit
+    text = re.sub(
+        r'^(chapter|part|section|act)\s+[\w\d]+[:\s\-–—]*.*$',
+        '',
+        text,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    # Collapse 3+ blank lines down to one paragraph break
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
 def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
     """Split text into (chunk, is_chapter_boundary) tuples.
 
@@ -234,11 +260,11 @@ ELEVENLABS_VOICES: dict[str, str] = {
 
 
 _AUDIENCE_SPEED: dict[str, float] = {
-    "children (ages 4–6)":  0.70,
-    "children (ages 7–12)": 0.75,
-    "children (ages 13+)":  0.79,
+    "children (ages 4–6)":  0.74,
+    "children (ages 7–12)": 0.79,
+    "children (ages 13+)":  0.83,
 }
-_DEFAULT_SPEED = 0.82
+_DEFAULT_SPEED = 0.88
 
 
 def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, bytes]:
@@ -294,7 +320,7 @@ def _synthesize_blocking(
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
-    chunk_tuples = _chunk_text(story_text, max_chars=39000)
+    chunk_tuples = _chunk_text(_prepare_tts_text(story_text), max_chars=39000)
     logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunk_tuples), speed)
 
     raw_results: dict[int, bytes] = {}
