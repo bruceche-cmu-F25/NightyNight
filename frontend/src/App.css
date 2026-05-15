@@ -10,6 +10,7 @@ html, body, #root {
 
 .root {
   min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -252,11 +253,13 @@ html, body, #root {
 
 .bg-toggle {
   position: fixed;
-  top: 1.2rem;
-  right: 1.4rem;
+  top: max(1.2rem, env(safe-area-inset-top) + 0.5rem);
+  right: max(1.4rem, env(safe-area-inset-right) + 0.5rem);
   z-index: 10;
   display: flex;
   gap: 0.4rem;
+  flex-wrap: wrap;
+  max-width: calc(100vw - 2rem);
 }
 
 .bg-toggle-btn {
@@ -298,7 +301,7 @@ html, body, #root {
 }
 
 .drawer {
-  width: 280px;
+  width: min(280px, 90vw);
   height: 100%;
   background: rgba(8, 10, 20, 0.92);
   backdrop-filter: blur(20px);
@@ -378,8 +381,8 @@ html, body, #root {
 
 .ambient-wrap {
   position: fixed;
-  bottom: 1.6rem;
-  right: 1.6rem;
+  bottom: max(1.6rem, env(safe-area-inset-bottom) + 0.5rem);
+  right: max(1.6rem, env(safe-area-inset-right) + 0.5rem);
   z-index: 50;
   display: flex;
   flex-direction: column;

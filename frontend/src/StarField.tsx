@@ -54,12 +54,17 @@ export default function StarField({ theme, mode }: Props) {
     const canvas = canvasRef.current!
     const ctx    = canvas.getContext('2d')!
 
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight }
-    resize()
-    window.addEventListener('resize', resize)
-
     const STAR_COLORS = ['#ffe566', '#ffb3d1', '#c9b3ff', '#b3e8ff', '#b3ffd6']
-    const COUNT = 90
+    const COUNT = window.innerWidth < 768 ? 50 : 90
+
+    canvas.width  = window.innerWidth
+    canvas.height = window.innerHeight
+
+    const onResize = () => {
+      canvas.width  = window.innerWidth
+      canvas.height = window.innerHeight
+    }
+    window.addEventListener('resize', onResize)
 
     interface DreamyStar {
       x: number; y: number
@@ -72,8 +77,8 @@ export default function StarField({ theme, mode }: Props) {
     }
 
     const stars: DreamyStar[] = Array.from({ length: COUNT }, () => ({
-      x:            Math.random() * window.innerWidth,
-      y:            Math.random() * window.innerHeight,
+      x:            Math.random() * canvas.width,
+      y:            Math.random() * canvas.height,
       vx:           (Math.random() - 0.5) * 0.08,
       vy:           (Math.random() - 0.5) * 0.08,
       radius:       Math.random() * 2.2 + 0.8,
@@ -161,7 +166,7 @@ export default function StarField({ theme, mode }: Props) {
     }
 
     animId.current = requestAnimationFrame(draw)
-    return () => { cancelAnimationFrame(animId.current); window.removeEventListener('resize', resize) }
+    return () => { cancelAnimationFrame(animId.current); window.removeEventListener('resize', onResize) }
   }, [mode])
 
   // ── Galaxy canvas (galaxy-shaped, dense core, comets) ────────────────────
@@ -170,9 +175,8 @@ export default function StarField({ theme, mode }: Props) {
     const canvas = canvasRef.current!
     const ctx    = canvas.getContext('2d')!
 
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight }
-    resize()
-    window.addEventListener('resize', resize)
+    canvas.width  = window.innerWidth
+    canvas.height = window.innerHeight
 
     const gauss = () => {
       let u = 0, v = 0
@@ -184,6 +188,7 @@ export default function StarField({ theme, mode }: Props) {
     const CORE_COLORS = ['#fff8e0', '#ffe8a0', '#ffd080', '#e0f0ff', '#c0d8ff', '#ffb8b8']
     const EDGE_COLORS = ['#ffffff', '#e8eeff', '#f0f8ff']
     const TILT = Math.PI * 0.22
+    const STAR_COUNT = window.innerWidth < 768 ? 150 : 300
 
     interface GalaxyStar {
       x: number; y: number; r: number; color: string
@@ -191,7 +196,7 @@ export default function StarField({ theme, mode }: Props) {
     }
 
     const makeStars = (): GalaxyStar[] =>
-      Array.from({ length: 300 }, () => {
+      Array.from({ length: STAR_COUNT }, () => {
         const gx = gauss() * canvas.width  * 0.28
         const gy = gauss() * canvas.height * 0.16
         const rx = gx * Math.cos(TILT) - gy * Math.sin(TILT) + canvas.width  / 2
@@ -212,7 +217,14 @@ export default function StarField({ theme, mode }: Props) {
       })
 
     let stars = makeStars()
-    window.addEventListener('resize', () => { stars = makeStars() })
+    let galaxyResizeTimer: ReturnType<typeof setTimeout>
+    const onGalaxyResize = () => {
+      canvas.width  = window.innerWidth
+      canvas.height = window.innerHeight
+      clearTimeout(galaxyResizeTimer)
+      galaxyResizeTimer = setTimeout(() => { stars = makeStars() }, 150)
+    }
+    window.addEventListener('resize', onGalaxyResize)
 
     interface Comet { x: number; y: number; vx: number; vy: number; len: number; opacity: number; active: boolean }
     const spawnComet = (): Comet => {
@@ -293,7 +305,7 @@ export default function StarField({ theme, mode }: Props) {
     }
 
     animId.current = requestAnimationFrame(draw)
-    return () => { cancelAnimationFrame(animId.current); window.removeEventListener('resize', resize) }
+    return () => { cancelAnimationFrame(animId.current); clearTimeout(galaxyResizeTimer); window.removeEventListener('resize', onGalaxyResize) }
   }, [mode])
 
   // ── Canvas stars (simple twinkling) ──────────────────────────────────────
@@ -302,32 +314,40 @@ export default function StarField({ theme, mode }: Props) {
     const canvas = canvasRef.current!
     const ctx    = canvas.getContext('2d')!
 
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight }
-    resize()
-    window.addEventListener('resize', resize)
-
-    // Low-saturation star tints — mostly white with a faint hue
     const STAR_TINTS = [
-      '#ffffff',  // pure white
-      '#ffffff',  // weight white more heavily
-      '#c1e1fa',
-      '#92b4f1',  // faint blue
-      '#f2cca4',  // faint orange
-      '#f3f179',  // faint yellow
-      '#eccece',  // faint red
-      '#f0d0e0',  // faint pink
+      '#ffffff', '#ffffff',
+      '#c1e1fa', '#92b4f1', '#f2cca4', '#f3f179', '#eccece', '#f0d0e0',
     ]
 
-    const particles = Array.from({ length: 300 }, () => ({
-      x:     Math.random() * canvas.width,
-      y:     Math.random() * canvas.height,
-      vx:    (Math.random() - 0.5) * 0.12,
-      vy:    (Math.random() - 0.5) * 0.12,
-      r:     Math.random() * 2.2 + 0.6,
-      color: STAR_TINTS[Math.floor(Math.random() * STAR_TINTS.length)],
-      opacity: Math.random(),
-      delta: (Math.random() * 0.004 + 0.001) * (Math.random() < 0.5 ? 1 : -1),
-    }))
+    const isMobile = () => window.innerWidth < 768
+    const COUNT    = isMobile() ? 140 : 300
+
+    const makeParticles = (w: number, h: number) =>
+      Array.from({ length: COUNT }, () => ({
+        x:       Math.random() * w,
+        y:       Math.random() * h,
+        vx:      (Math.random() - 0.5) * 0.12,
+        vy:      (Math.random() - 0.5) * 0.12,
+        r:       Math.random() * 2.2 + 0.6,
+        color:   STAR_TINTS[Math.floor(Math.random() * STAR_TINTS.length)],
+        opacity: Math.random(),
+        delta:   (Math.random() * 0.004 + 0.001) * (Math.random() < 0.5 ? 1 : -1),
+      }))
+
+    canvas.width  = window.innerWidth
+    canvas.height = window.innerHeight
+    let particles = makeParticles(canvas.width, canvas.height)
+
+    let resizeTimer: ReturnType<typeof setTimeout>
+    const resize = () => {
+      canvas.width  = window.innerWidth
+      canvas.height = window.innerHeight
+      clearTimeout(resizeTimer)
+      resizeTimer = setTimeout(() => {
+        particles = makeParticles(canvas.width, canvas.height)
+      }, 150)
+    }
+    window.addEventListener('resize', resize)
 
     const draw = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height)
@@ -351,7 +371,7 @@ export default function StarField({ theme, mode }: Props) {
     }
 
     animId.current = requestAnimationFrame(draw)
-    return () => { cancelAnimationFrame(animId.current); window.removeEventListener('resize', resize) }
+    return () => { cancelAnimationFrame(animId.current); clearTimeout(resizeTimer); window.removeEventListener('resize', resize) }
   }, [mode])
 
   return (
