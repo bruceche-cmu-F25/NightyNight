@@ -275,7 +275,7 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: 
         headers={"xi-api-key": api_key, "Content-Type": "application/json"},
         json=payload,
         params={"output_format": "mp3_44100_128"},
-        timeout=60,
+        timeout=300,
     )
 
     if not resp.ok:
@@ -516,6 +516,11 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
 
         if synthesis_future is not None:
             try:
+                # Send keepalive comments while TTS is running so the proxy
+                # doesn't close the SSE connection during a long synthesis.
+                while not synthesis_future.done():
+                    yield ": tts-pending\n\n"
+                    await asyncio.sleep(5)
                 await synthesis_future
                 audio_url = f"/audio/{content_hash}.mp3"
                 logger.info("TTS synthesis complete.")
