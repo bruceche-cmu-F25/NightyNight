@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 from pathlib import Path
@@ -242,20 +241,9 @@ _AUDIENCE_SPEED: dict[str, float] = {
 _DEFAULT_SPEED = 0.82
 
 
-def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, "AudioSegment"]:
-    """Synthesize a single text chunk via ElevenLabs TTS.
-
-    ElevenLabs produces highly natural, emotionally consistent narration — well-suited
-    for long-form bedtime content. Voice settings tuned for calm, unhurried narration:
-      stability=0.75  → consistent tone without sounding robotic
-      similarity_boost=0.80  → stays close to the reference voice character
-      style=0.05      → minimal expressiveness exaggeration (calm, not dramatic)
-      use_speaker_boost=True  → cleaner, more present vocal sound
-    """
-    from io import BytesIO
-
+def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, bytes]:
+    """Call ElevenLabs TTS and return raw MP3 bytes."""
     import requests
-    from pydub import AudioSegment
 
     url = _ELEVENLABS_TTS_URL.format(voice_id=voice_id)
     payload = {
@@ -283,8 +271,7 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: 
             f"ElevenLabs TTS error {resp.status_code}: {resp.text[:400]}"
         )
 
-    audio_seg = AudioSegment.from_mp3(BytesIO(resp.content))
-    return idx, audio_seg
+    return idx, resp.content
 
 
 def _synthesize_blocking(
@@ -295,69 +282,40 @@ def _synthesize_blocking(
     out_path: str,
     audience: str = "",
 ) -> tuple[int, int]:
-    """Synthesize story text via Gemini TTS, optionally mix ambient sound.
+    """Synthesize story text to MP3. Ambient sound is played client-side.
 
-    Chunks are synthesized in parallel via ThreadPoolExecutor, then reassembled
-    in order. Returns (duration_ms, chunks_synthesized).
-    Runs synchronously — call via run_in_executor to avoid blocking the event loop.
+    Single-chunk path (common case): writes raw ElevenLabs bytes directly to disk
+    — no pydub, no PCM decode, negligible memory.
+    Multi-chunk path: concatenates raw MP3 bytes in order. No pydub needed.
+
+    Returns (duration_ms, chunks_synthesized).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from pydub import AudioSegment, effects as _fx
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
     chunk_tuples = _chunk_text(story_text, max_chars=39000)
-    logger.info("TTS: synthesizing %d chunks in parallel (speed=%.2f)", len(chunk_tuples), speed)
+    logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunk_tuples), speed)
 
-    # Synthesize all chunks in parallel; each item is (text, is_chapter_boundary)
-    results: dict[int, AudioSegment] = {}
+    raw_results: dict[int, bytes] = {}
     with ThreadPoolExecutor(max_workers=min(len(chunk_tuples), 2)) as pool:
         futures = {
             pool.submit(_synthesize_chunk, i, text, voice_name, api_key, speed): i
             for i, (text, _) in enumerate(chunk_tuples)
         }
         for future in as_completed(futures):
-            idx, seg = future.result()
-            results[idx] = seg
-            logger.info("TTS: chunk %d/%d done", idx + 1, len(chunk_tuples))
+            idx, raw = future.result()
+            raw_results[idx] = raw
+            logger.info("TTS: chunk %d/%d done (%d KB)", idx + 1, len(chunk_tuples), len(raw) // 1024)
 
-    # Normalize each chunk to consistent loudness before assembly
-    for idx in results:
-        results[idx] = _fx.normalize(results[idx])
+    # Concatenate chunks in order and write to disk — no pydub, no PCM in memory.
+    with open(out_path, "wb") as f:
+        for i in range(len(chunk_tuples)):
+            f.write(raw_results[i])
 
-    # Reassemble in order with crossfade between paragraphs and longer pause at chapters
-    _CROSSFADE_MS      = 80    # smooth join between adjacent paragraph chunks
-    _CHAPTER_PAUSE_MS  = 600   # extra breath between chapters
-
-    narration = AudioSegment.empty()
-    for i in range(len(chunk_tuples)):
-        seg = results[i]
-        _, is_chapter = chunk_tuples[i]
-        if len(narration) == 0:
-            narration = seg
-        elif is_chapter:
-            # Chapter boundary: fade out tail, add silence, fade in new segment
-            silence = AudioSegment.silent(duration=_CHAPTER_PAUSE_MS, frame_rate=24000)
-            narration = narration.append(silence, crossfade=_CROSSFADE_MS)
-            narration = narration.append(seg, crossfade=_CROSSFADE_MS)
-        else:
-            narration = narration.append(seg, crossfade=_CROSSFADE_MS)
-
-    # Ambient mixing
-    if ambient != "none":
-        ambient_file = _pick_ambient_file(ambient)
-        if ambient_file:
-            try:
-                amb_seg = AudioSegment.from_file(ambient_file)
-                loops_needed = math.ceil(len(narration) / len(amb_seg))
-                amb_looped = (amb_seg * loops_needed)[: len(narration)]
-                amb_quiet = amb_looped + ambient_db
-                narration = narration.overlay(amb_quiet)
-            except Exception as exc:
-                logger.warning("Ambient mixing failed (%s) — continuing narration-only: %s", ambient_file, exc)
-
-    narration.export(out_path, format="mp3", bitrate="192k")
-    return len(narration), len(chunk_tuples)
+    total_bytes = sum(len(b) for b in raw_results.values())
+    duration_ms = total_bytes * 1000 // 16000  # rough estimate at 128 kbps
+    return duration_ms, len(chunk_tuples)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -601,11 +559,9 @@ async def generate_audio(request: AudioRequest) -> JSONResponse:
     audio_path = os.path.join(AUDIO_DIR, audio_filename)
 
     if os.path.exists(audio_path):
-        from pydub import AudioSegment
-        duration_ms = len(AudioSegment.from_mp3(audio_path))
         return JSONResponse(content={
             "audio_url": f"/audio/{audio_filename}",
-            "duration_seconds": duration_ms // 1000,
+            "duration_seconds": 0,
             "chunks_synthesized": 0,
             "ambient_mixed": request.ambient,
             "cached": True,

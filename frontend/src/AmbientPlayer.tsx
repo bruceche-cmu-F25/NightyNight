@@ -8,9 +8,12 @@ const SOUNDS = [
   { label: 'Cosmos', icon: '🌌', category: 'cosmos' },
 ]
 
-interface Props { accent: string }
+interface Props {
+  accent: string
+  autoPlay?: string | null  // ambient category to auto-start (only if nothing playing yet)
+}
 
-export default function AmbientPlayer({ accent }: Props) {
+export default function AmbientPlayer({ accent, autoPlay }: Props) {
   const [open,     setOpen]     = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [playing,  setPlaying]  = useState(false)
@@ -26,6 +29,17 @@ export default function AmbientPlayer({ accent }: Props) {
     audioRef.current = a
     return () => { a.pause() }
   }, [])
+
+  // auto-start when generation begins (only if user hasn't manually picked a sound)
+  useEffect(() => {
+    if (!autoPlay || selected || !audioRef.current) return
+    const sound = SOUNDS.find(s => s.category === autoPlay)
+    if (!sound) return
+    const a = audioRef.current
+    a.src = `/ambient/${sound.category}`
+    a.volume = volume
+    a.play().then(() => { setPlaying(true); setSelected(sound.label) }).catch(() => {})
+  }, [autoPlay])
 
   // close panel on outside click
   useEffect(() => {

@@ -30,6 +30,22 @@ const BG_MODES: { mode: BackgroundMode; label: string }[] = [
   { mode: 'galaxy', label: '✧ Galaxy' },
 ]
 
+const TOPIC_AMBIENT: [string[], string][] = [
+  [['space', 'cosmos', 'star', 'planet', 'galaxy', 'universe', 'astro', 'nebula', 'moon', 'solar', 'orbit', 'nasa', 'rocket', 'comet', 'milky'], 'cosmos'],
+  [['ocean', 'sea', 'wave', 'beach', 'marine', 'coral', 'fish', 'whale', 'deep', 'underwater', 'shark', 'tide'], 'ocean'],
+  [['rain', 'storm', 'thunder', 'cloud', 'weather', 'monsoon', 'flood', 'river', 'water', 'lake', 'pond'], 'rain'],
+  [['forest', 'wood', 'tree', 'nature', 'jungle', 'animal', 'bird', 'wildlife', 'plant', 'bug', 'insect', 'frog', 'cricket'], 'woods'],
+  [['fire', 'volcano', 'lava', 'flame', 'campfire', 'magma', 'eruption'], 'fire'],
+]
+
+function topicToAmbient(topic: string): string {
+  const lower = topic.toLowerCase()
+  for (const [keywords, category] of TOPIC_AMBIENT) {
+    if (keywords.some(kw => lower.includes(kw))) return category
+  }
+  return 'cosmos'
+}
+
 const AUDIENCE_BG: Record<string, BackgroundMode> = {
   'children (ages 4–6)':  'dreamy',
   'children (ages 7–12)': 'galaxy',
@@ -50,7 +66,8 @@ export default function App() {
   const [progress,     setProgress]     = useState(0)
   const [story,        setStory]        = useState('')
   const [audioUrl,     setAudioUrl]     = useState<string | null>(null)
-  const [errorMsg,     setErrorMsg]     = useState('')
+  const [errorMsg,          setErrorMsg]          = useState('')
+  const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
 
@@ -63,6 +80,7 @@ export default function App() {
     if (!topic.trim()) return
 
     setPhase('generating')
+    setAutoPlayAmbient(topicToAmbient(topic))
     setProgress(0)
     setStatus('Starting…')
     setStory('')
@@ -116,7 +134,7 @@ export default function App() {
       : bgMode === 'galaxy' ? 'radial-gradient(ellipse at 50% 80%, #0a0d2a 0%, #060818 55%, #020510 100%)'
       : THEME.bg }}>
       <StarField theme={THEME} mode={bgMode} />
-      <AmbientPlayer accent={THEME.accentColor} />
+      <AmbientPlayer accent={THEME.accentColor} autoPlay={autoPlayAmbient} />
 
       <SettingsDrawer
         open={settingsOpen}
