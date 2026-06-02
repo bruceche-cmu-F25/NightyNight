@@ -24,29 +24,6 @@ _SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
 # Ambient sounds directory: CountingStars/sounds/ (or override via SOUNDS_DIR env var)
 _SOUNDS_DIR = os.environ.get("SOUNDS_DIR", str(Path(__file__).resolve().parents[3] / "sounds"))
 
-# One representative file per ambient category
-_AMBIENT_FILES: dict[str, str] = {
-    "fire":   "fire/fire01.mp3",
-    "rain":   "rain/Light rain recordings mixed settings-01.wav",
-    "ocean":  "ocean/ocean01.mp3",
-    "woods":  "woods/woods01.mp3",
-    "cosmos": "cosmos/cosmos01.wav",
-}
-
-# rag_domain → ambient mapping used when ambient == "auto"
-_DOMAIN_AMBIENT: dict[str, str] = {
-    "cosmos":       "cosmos",
-    "life":         "woods",
-    "civilization": "fire",
-}
-_DEFAULT_AMBIENT = "rain"
-
-
-def _resolve_ambient(ambient: str, domain: str) -> str:
-    """Return resolved ambient name. If 'auto', pick from rag_domain; else use as-is."""
-    if ambient != "auto":
-        return ambient
-    return _DOMAIN_AMBIENT.get(domain.lower(), _DEFAULT_AMBIENT)
 
 load_dotenv()
 
@@ -60,46 +37,12 @@ if not _agent_logger.handlers:
 app = FastAPI(title="CountingStars API", version="0.1.0")
 
 
-@app.on_event("startup")
-async def auto_index_on_startup() -> None:
-    """Index sources/ into Milvus on first boot if the collection doesn't exist yet.
-
-    Uses utility.has_collection() as the authoritative check — no false negatives
-    from empty search results. Restarts are instant if the collection already exists.
-    To force a full rebuild, call POST /index?drop_old=true manually.
-    """
-    from pymilvus import connections, utility
-    from agent.graph import _MILVUS_URI, _MILVUS_TOKEN, _MILVUS_COLLECTION
-
-    if not Path(_SOURCES_DIR).is_dir():
-        logger.warning("sources dir not found at %s — skipping auto-index", _SOURCES_DIR)
-        return
-
-    try:
-        connections.connect(uri=_MILVUS_URI, token=_MILVUS_TOKEN or None)
-        if utility.has_collection(_MILVUS_COLLECTION):
-            logger.info("Milvus collection '%s' already exists — skipping auto-index.", _MILVUS_COLLECTION)
-            # Warm up the vector store cache here (async context) so verify_facts
-            # doesn't trigger AsyncMilvusClient warnings on its first sync call.
-            from agent.graph import _get_vector_store
-            _get_vector_store()
-            return
-    except Exception as exc:
-        logger.warning("Could not reach Milvus (%s) — skipping auto-index.", exc)
-        return
-
-    logger.info("Collection not found — starting auto-index...")
-    try:
-        summary = ingest_sources(_SOURCES_DIR, drop_old=False)
-        logger.info("Auto-index complete: %s", summary)
-    except Exception as exc:
-        logger.error("Auto-index failed (server will still start): %s", exc)
-        return
-
-    # Warm up the cached vector store here (async context) so the first call
-    # from verify_facts (sync node) doesn't trigger the AsyncMilvusClient warning.
-    from agent.graph import _get_vector_store
-    _get_vector_store()
+# @app.on_event("startup")
+# async def auto_index_on_startup() -> None:
+#     """Milvus auto-index on startup — disabled (RAG not in use)."""
+#     from pymilvus import connections, utility
+#     from agent.graph import _MILVUS_URI, _MILVUS_TOKEN, _MILVUS_COLLECTION
+#     ...  # kept for reference; re-enable if RAG is restored
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,6 +87,9 @@ def _prepare_tts_text(text: str) -> str:
     return text.strip()
 
 
+_HEADING_RE = re.compile(r'^\s*(#{1,3}\s+.+|[A-Z][A-Z\s\d:,\-]{10,})\s*$', re.MULTILINE)
+
+
 def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
     """Split text into (chunk, is_chapter_boundary) tuples.
 
@@ -155,8 +101,6 @@ def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
     Returns a list of (text_chunk, is_chapter_boundary) where is_chapter_boundary=True
     marks the *start* of a new chapter (used to insert longer silence before it).
     """
-    # Detect chapter headings: lines that start with #, or ALL-CAPS titles, etc.
-    _HEADING_RE = re.compile(r'^\s*(#{1,3}\s+.+|[A-Z][A-Z\s\d:,\-]{10,})\s*$', re.MULTILINE)
 
     def _sentences(para: str) -> list[str]:
         """Split a paragraph into sentences as a fallback for long paragraphs."""
@@ -303,8 +247,6 @@ def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: 
 def _synthesize_blocking(
     story_text: str,
     voice_name: str,
-    ambient: str,
-    ambient_db: float,
     out_path: str,
     audience: str = "",
 ) -> tuple[int, int]:
@@ -346,67 +288,13 @@ def _synthesize_blocking(
 
 # ── Request / response models ─────────────────────────────────────────────────
 
-class AudioRequest(BaseModel):
-    story_text: str = Field(..., min_length=100, description="The final story text to convert to audio")
-    voice: str = Field(
-        default="21m00Tcm4TlvDq8ikWAM",
-        description=(
-            "ElevenLabs voice ID. "
-            "Rachel (warm female): '21m00Tcm4TlvDq8ikWAM'. "
-            "Adam (deep male): 'pNInz6obpgDQGcFmaJgB'. "
-            "Daniel (narrative male): 'onwK4e9ZLuTAKqWW03F9'."
-        ),
-    )
-    ambient: str = Field(
-        default="none",
-        description='Ambient sound: "fire", "rain", "ocean", "woods", or "none"',
-    )
-    ambient_db: float = Field(
-        default=-12.0,
-        ge=-40.0,
-        le=-6.0,
-        description="Ambient volume relative to narration in dB (negative = quieter)",
-    )
-
-
 class GenerateRequest(BaseModel):
     topic: str = Field(..., min_length=2, max_length=200, description="Story topic")
-    duration_min: int = Field(
-        default=15,
-        ge=8,
-        le=25,
-        description="Target episode duration in minutes (8–25)",
-    )
-    style: str = Field(
-        default="calm documentary",
-        max_length=100,
-        description='Narration style, e.g. "calm documentary", "gentle bedtime"',
-    )
-    audience: str = Field(
-        default="curious adults",
-        max_length=100,
-        description='Target audience, e.g. "curious adults", "science enthusiasts"',
-    )
-    domain: str = Field(
-        default="general science",
-        max_length=100,
-        description='Science domain, e.g. "cosmology", "biology", "history of science"',
-    )
-    # TTS fields — server kicks off synthesis immediately after polish_story completes
-    voice: str = Field(
-        default="21m00Tcm4TlvDq8ikWAM",
-        description=(
-            "ElevenLabs voice ID. "
-            "Rachel (warm female): '21m00Tcm4TlvDq8ikWAM'. "
-            "Adam (deep male): 'pNInz6obpgDQGcFmaJgB'. "
-            "Daniel (narrative male): 'onwK4e9ZLuTAKqWW03F9'."
-        ),
-    )
-    ambient: str = Field(
-        default="auto",
-        description='"auto" picks ambient by domain; or "fire","rain","ocean","woods","cosmos","none"',
-    )
-    ambient_db: float = Field(default=-12.0, ge=-40.0, le=-6.0)
+    duration_min: int = Field(default=15, ge=8, le=25, description="Target duration in minutes (8–25)")
+    style: str = Field(default="calm documentary", max_length=100)
+    audience: str = Field(default="curious adults", max_length=100)
+    domain: str = Field(default="general science", max_length=100)
+    voice: str = Field(default="21m00Tcm4TlvDq8ikWAM", description="ElevenLabs voice ID")
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
@@ -465,15 +353,13 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                 if node_name == "polish_story" and synthesis_future is None:
                     polished = current_state.get("final_story")
                     if polished:
-                        resolved_ambient = _resolve_ambient(request.ambient, request.domain)
                         content_hash = hashlib.sha256(polished.encode()).hexdigest()[:16]
                         audio_out = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
                         if not os.path.exists(audio_out):
-                            loop = asyncio.get_event_loop()
+                            loop = asyncio.get_running_loop()
                             synthesis_future = loop.run_in_executor(
                                 None, _synthesize_blocking,
-                                polished, request.voice, resolved_ambient,
-                                request.ambient_db, audio_out, request.audience,
+                                polished, request.voice, audio_out, request.audience,
                             )
                             logger.info("TTS synthesis started in background (parallel chunks).")
                         else:
@@ -491,7 +377,6 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                     "node": node_name,
                     "chapter": chapter_num,
                     "message": current_state.get("status_message", ""),
-                    "forced_chapters": [],
                 })
 
         # Graph complete — await TTS (may already be done by now)
@@ -518,8 +403,6 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
                 "event": "done",
                 "final_story": final_story,
                 "audio_url": audio_url,
-                "forced_chapters": [],
-                "status_message": current_state.get("status_message", ""),
             })
         else:
             yield _sse({"event": "error", "message": "Graph completed but final_story is missing."})
@@ -569,54 +452,6 @@ async def index(drop_old: bool = False) -> JSONResponse:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/generate-audio")
-async def generate_audio(request: AudioRequest) -> JSONResponse:
-    """Convert story text to audio via Gemini TTS, optionally mixed with ambient sound.
-
-    Long stories are split into sentence-boundary chunks (≤4000 chars each) and
-    synthesized in sequence, then concatenated with pydub. Audio is cached by content
-    hash — repeated calls for the same story return instantly without re-synthesizing.
-
-    Returns JSON: { audio_url, duration_seconds, chunks_synthesized, ambient_mixed }
-    """
-    # Stable filename from content hash — free deduplication
-    content_hash = hashlib.sha256(request.story_text.encode()).hexdigest()[:16]
-    audio_filename = f"{content_hash}.mp3"
-    audio_path = os.path.join(AUDIO_DIR, audio_filename)
-
-    if os.path.exists(audio_path):
-        return JSONResponse(content={
-            "audio_url": f"/audio/{audio_filename}",
-            "duration_seconds": 0,
-            "chunks_synthesized": 0,
-            "ambient_mixed": request.ambient,
-            "cached": True,
-        })
-
-    try:
-        loop = asyncio.get_event_loop()
-        duration_ms, chunks_synthesized = await loop.run_in_executor(
-            None,
-            _synthesize_blocking,
-            request.story_text,
-            request.voice,
-            request.ambient,
-            request.ambient_db,
-            audio_path,
-        )
-    except Exception as exc:
-        logger.error("/generate-audio failed: %s", exc)
-        raise HTTPException(status_code=500, detail=str(exc))
-
-    return JSONResponse(content={
-        "audio_url": f"/audio/{audio_filename}",
-        "duration_seconds": duration_ms // 1000,
-        "chunks_synthesized": chunks_synthesized,
-        "ambient_mixed": request.ambient,
-        "cached": False,
-    })
-
-
 @app.post("/generate")
 async def generate(request: GenerateRequest) -> StreamingResponse:
     """
@@ -626,7 +461,7 @@ async def generate(request: GenerateRequest) -> StreamingResponse:
     listen for `data:` lines. Each line is a JSON object with an `event` field:
 
     - `node_done`  — a LangGraph node finished; includes `node`, `chapter`, `message`
-    - `done`       — pipeline complete; includes `final_story` and `forced_chapters`
+    - `done`       — pipeline complete; includes `final_story` and `audio_url`
     - `error`      — something went wrong; includes `message`
     """
     return StreamingResponse(

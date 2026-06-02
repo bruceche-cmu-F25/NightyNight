@@ -5,7 +5,6 @@ export interface GenerateRequest {
   audience: string
   domain: string
   voice: string
-  ambient: string
 }
 
 export interface NodeDoneEvent {
@@ -36,11 +35,12 @@ export const NODE_PROGRESS: Record<string, number> = {
   polish_story:      92,
 }
 
-export async function* streamGenerate(req: GenerateRequest): AsyncGenerator<SSEEvent> {
+export async function* streamGenerate(req: GenerateRequest, signal?: AbortSignal): AsyncGenerator<SSEEvent> {
   const resp = await fetch('/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
+    signal,
   })
 
   if (!resp.ok) throw new Error(`Server error ${resp.status}`)

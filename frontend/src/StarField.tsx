@@ -1,25 +1,17 @@
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
-import { Theme } from './theme'
 
 export type BackgroundMode = 'stars' | 'aurora' | 'dreamy' | 'galaxy'
 
-
 interface Props {
-  theme: Theme
   mode: BackgroundMode
 }
 
-export default function StarField({ theme, mode }: Props) {
+export default function StarField({ mode }: Props) {
   const canvasRef  = useRef<HTMLCanvasElement>(null)
   const vantaRef   = useRef<HTMLDivElement>(null)
   const vantaFx    = useRef<any>(null)
-  const themeRef   = useRef(theme)
-  const modeRef    = useRef(mode)
   const animId     = useRef(0)
-
-  themeRef.current = theme
-  modeRef.current  = mode
 
   // ── Vanta FOG (aurora mode) ───────────────────────────────────────────────
   useEffect(() => {
@@ -46,7 +38,7 @@ export default function StarField({ theme, mode }: Props) {
     })
 
     return () => { if (vantaFx.current) { vantaFx.current.destroy(); vantaFx.current = null } }
-  }, [mode, theme.accentColor, theme.particleColor])
+  }, [mode])
 
   // ── Dreamy canvas (children mode) ────────────────────────────────────────
   useEffect(() => {
@@ -64,7 +56,7 @@ export default function StarField({ theme, mode }: Props) {
       canvas.width  = window.innerWidth
       canvas.height = window.innerHeight
     }
-    window.addEventListener('resize', onResize)
+    window.addEventListener('resize', onResize, { passive: true })
 
     interface DreamyStar {
       x: number; y: number
@@ -224,7 +216,7 @@ export default function StarField({ theme, mode }: Props) {
       clearTimeout(galaxyResizeTimer)
       galaxyResizeTimer = setTimeout(() => { stars = makeStars() }, 150)
     }
-    window.addEventListener('resize', onGalaxyResize)
+    window.addEventListener('resize', onGalaxyResize, { passive: true })
 
     interface Comet { x: number; y: number; vx: number; vy: number; len: number; opacity: number; active: boolean }
     const spawnComet = (): Comet => {
@@ -347,7 +339,7 @@ export default function StarField({ theme, mode }: Props) {
         particles = makeParticles(canvas.width, canvas.height)
       }, 150)
     }
-    window.addEventListener('resize', resize)
+    window.addEventListener('resize', resize, { passive: true })
 
     const draw = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height)

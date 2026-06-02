@@ -79,6 +79,9 @@ export default function App() {
   const handleGenerate = useCallback(async () => {
     if (!topic.trim()) return
 
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+
     setPhase('generating')
     setAutoPlayAmbient(topicToAmbient(topic))
     setProgress(0)
@@ -94,13 +97,12 @@ export default function App() {
       audience:     settings.audience,
       domain:       'general science',
       voice,
-      ambient:      settings.ambient,
     }
 
     try {
-      for await (const ev of streamGenerate(req)) {
+      for await (const ev of streamGenerate(req, ctrl.signal)) {
         if (ev.event === 'node_done') {
-          const pct = NODE_PROGRESS[ev.node] ?? progress
+          const pct = NODE_PROGRESS[ev.node] ?? 0
           setProgress(p => Math.max(p, pct))
           setStatus(ev.message || ev.node)
         } else if (ev.event === 'done') {
@@ -113,10 +115,11 @@ export default function App() {
         }
       }
     } catch (e: unknown) {
+      if ((e as { name?: string }).name === 'AbortError') return
       setErrorMsg(e instanceof Error ? e.message : String(e))
       setPhase('error')
     }
-  }, [topic, duration, voice, settings, progress])
+  }, [topic, duration, voice, settings])
 
   const handleReset = () => {
     abortRef.current?.abort()
@@ -133,7 +136,7 @@ export default function App() {
         bgMode === 'dreamy' ? 'radial-gradient(ellipse at 50% 70%, #1a1235 0%, #0e0a24 55%, #07051a 100%)'
       : bgMode === 'galaxy' ? 'radial-gradient(ellipse at 50% 80%, #0a0d2a 0%, #060818 55%, #020510 100%)'
       : THEME.bg }}>
-      <StarField theme={THEME} mode={bgMode} />
+      <StarField mode={bgMode} />
       <AmbientPlayer accent={THEME.accentColor} autoPlay={autoPlayAmbient} />
 
       <SettingsDrawer

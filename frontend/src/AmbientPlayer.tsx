@@ -18,6 +18,7 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
   const [selected, setSelected] = useState<string | null>(null)
   const [playing,  setPlaying]  = useState(false)
   const [volume,   setVolume]   = useState(0.35)
+  const volumeRef = useRef(0.35)
   const audioRef  = useRef<HTMLAudioElement | null>(null)
   const panelRef  = useRef<HTMLDivElement>(null)
 
@@ -37,7 +38,7 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
     if (!sound) return
     const a = audioRef.current
     a.src = `/ambient/${sound.category}`
-    a.volume = volume
+    a.volume = volumeRef.current
     a.play().then(() => { setPlaying(true); setSelected(sound.label) }).catch(() => {})
   }, [autoPlay])
 
@@ -69,6 +70,7 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
   const handleVolume = (e: React.ChangeEvent<HTMLInputElement>) => {
     const v = Number(e.target.value)
     setVolume(v)
+    volumeRef.current = v
     if (audioRef.current) audioRef.current.volume = v
   }
 
