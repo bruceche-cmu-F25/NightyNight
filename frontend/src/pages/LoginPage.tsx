@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext'
 
 declare const google: any
 
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '793594470575-7c0ftlsergt8vrvhms2pij9osm2akdfd.apps.googleusercontent.com'
 const ACCENT = '#7fa8c8'
 
 export default function LoginPage() {
@@ -32,7 +33,7 @@ export default function LoginPage() {
   }
 
   useEffect(() => {
-    const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID
+    const clientId = GOOGLE_CLIENT_ID
     if (!clientId || !googleBtnRef.current) return
     try {
       google.accounts.id.initialize({
@@ -89,7 +90,7 @@ export default function LoginPage() {
             </button>
           </form>
 
-          {import.meta.env.VITE_GOOGLE_CLIENT_ID && (
+          {GOOGLE_CLIENT_ID && (
             <div style={{ marginTop: '1rem', width: '100%', display: 'flex', justifyContent: 'center' }}>
               <div ref={googleBtnRef} />
             </div>
