@@ -10,3 +10,9 @@ dist/
 /source/*
 /sounds/cosmos/cosmos01.wav
 */node_modules
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
