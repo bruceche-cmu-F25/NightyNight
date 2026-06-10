@@ -2,8 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
-declare const google: any
-
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '793594470575-7c0ftlsergt8vrvhms2pij9osm2akdfd.apps.googleusercontent.com'
 const ACCENT = '#7fa8c8'
 
@@ -34,23 +32,34 @@ export default function LoginPage() {
 
   useEffect(() => {
     const clientId = GOOGLE_CLIENT_ID
-    if (!clientId || !googleBtnRef.current) return
-    try {
-      google.accounts.id.initialize({
-        client_id: clientId,
-        callback: async ({ credential }: { credential: string }) => {
-          try {
-            await loginWithGoogle(credential)
-            navigate('/app')
-          } catch (err) {
-            setError(err instanceof Error ? err.message : 'Google login failed')
-          }
-        },
-      })
-      google.accounts.id.renderButton(googleBtnRef.current, {
-        theme: 'filled_black', size: 'large', width: 320,
-      })
-    } catch { /* Google SDK not loaded */ }
+    if (!clientId) return
+
+    const init = () => {
+      const g = (window as any).google
+      if (!g || !googleBtnRef.current) return
+      try {
+        g.accounts.id.initialize({
+          client_id: clientId,
+          callback: async ({ credential }: { credential: string }) => {
+            try {
+              await loginWithGoogle(credential)
+              navigate('/app')
+            } catch (err) {
+              setError(err instanceof Error ? err.message : 'Google login failed')
+            }
+          },
+        })
+        g.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'filled_black', size: 'large', width: 320,
+        })
+      } catch { /* renderButton failed */ }
+    }
+
+    if ((window as any).google) {
+      init()
+    } else {
+      (window as any).onGoogleLibraryLoad = init
+    }
   }, [])
 
   return (
