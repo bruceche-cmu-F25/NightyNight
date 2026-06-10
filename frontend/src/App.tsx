@@ -1,9 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import { Routes, Route, useNavigate } from 'react-router-dom'
 import StarField, { BackgroundMode } from './StarField'
 import SettingsDrawer, { Settings } from './SettingsDrawer'
 import AmbientPlayer from './AmbientPlayer'
 import { THEMES } from './theme'
 import { streamGenerate, NODE_PROGRESS, GenerateRequest } from './api'
+import { useAuth } from './context/AuthContext'
+import ProtectedRoute from './components/ProtectedRoute'
+import LoginPage from './pages/LoginPage'
+import RegisterPage from './pages/RegisterPage'
+import LibraryPage from './pages/LibraryPage'
 
 type Phase = 'idle' | 'generating' | 'done' | 'error'
 
@@ -55,6 +61,19 @@ const AUDIENCE_BG: Record<string, BackgroundMode> = {
 const THEME = THEMES.default
 
 export default function App() {
+  return (
+    <Routes>
+      <Route path="/login"    element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route path="/library"  element={<ProtectedRoute><LibraryPage /></ProtectedRoute>} />
+      <Route path="*"         element={<ProtectedRoute><MainApp /></ProtectedRoute>} />
+    </Routes>
+  )
+}
+
+function MainApp() {
+  const { accessToken, user, logout } = useAuth()
+  const navigate = useNavigate()
   const [topic,        setTopic]        = useState('')
   const [duration,     setDuration]     = useState(15)
   const [voice,        setVoice]        = useState(Object.values(VOICES)[0])
@@ -70,6 +89,14 @@ export default function App() {
   const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
 
   const abortRef = useRef<AbortController | null>(null)
+
+  // Load saved preferences from account on first login
+  useEffect(() => {
+    if (!user?.preferences) return
+    if (user.preferences.voice)    setVoice(user.preferences.voice)
+    if (user.preferences.audience) setSettings(s => ({ ...s, audience: user.preferences.audience! }))
+    if (user.preferences.style)    setSettings(s => ({ ...s, style: user.preferences.style! }))
+  }, [user?.id])
 
   // Auto-switch background when audience changes
   useEffect(() => {
@@ -100,7 +127,7 @@ export default function App() {
     }
 
     try {
-      for await (const ev of streamGenerate(req, ctrl.signal)) {
+      for await (const ev of streamGenerate(req, ctrl.signal, accessToken ?? undefined)) {
         if (ev.event === 'node_done') {
           const pct = NODE_PROGRESS[ev.node] ?? 0
           setProgress(p => Math.max(p, pct))
@@ -119,7 +146,7 @@ export default function App() {
       setErrorMsg(e instanceof Error ? e.message : String(e))
       setPhase('error')
     }
-  }, [topic, duration, voice, settings])
+  }, [topic, duration, voice, settings, accessToken])
 
   const handleReset = () => {
     abortRef.current?.abort()
@@ -165,6 +192,20 @@ export default function App() {
           style={{ '--accent': THEME.accentColor } as React.CSSProperties}
         >
           ⚙ Settings
+        </button>
+        <button
+          className="bg-toggle-btn"
+          onClick={() => navigate('/library')}
+          style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+        >
+          ☰ Library
+        </button>
+        <button
+          className="bg-toggle-btn"
+          onClick={logout}
+          style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+        >
+          ⏏ Sign out
         </button>
       </div>
 

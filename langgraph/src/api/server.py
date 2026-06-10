@@ -4,19 +4,29 @@ import json
 import logging
 import os
 import re
+from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import AsyncIterator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agent.graph import StoryState, graph, ingest_sources
+from api.auth import router as auth_router
+from api.deps import get_current_user
+from db.database import AsyncSessionLocal, Base, engine, get_db
+from db.models import Story, User
 
 logger = logging.getLogger(__name__)
+
+DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "5"))
 
 # Sources directory is at the repo root: CountingStars/sources/
 _SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
@@ -34,8 +44,17 @@ if not _agent_logger.handlers:
 
 # ── App setup ────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="CountingStars API", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("Database tables created/verified.")
+    yield
+    await engine.dispose()
 
+app = FastAPI(title="CountingStars API", version="0.1.0", lifespan=lifespan)
+
+app.include_router(auth_router)
 
 # @app.on_event("startup")
 # async def auto_index_on_startup() -> None:
@@ -44,11 +63,14 @@ app = FastAPI(title="CountingStars API", version="0.1.0")
 #     from agent.graph import _MILVUS_URI, _MILVUS_TOKEN, _MILVUS_COLLECTION
 #     ...  # kept for reference; re-enable if RAG is restored
 
+_FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten in production
+    allow_origins=[_FRONTEND_ORIGIN, "http://localhost:3000", "http://localhost:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 # Audio files served here (populated in Phase 2 when TTS is added)
@@ -286,6 +308,48 @@ def _synthesize_blocking(
     return duration_ms, len(chunk_tuples)
 
 
+# ── Auth / usage helpers ──────────────────────────────────────────────────────
+
+async def _reserve_usage_or_raise(user_id: str) -> None:
+    """Atomically check and increment the daily/monthly counters.
+
+    Uses SELECT ... FOR UPDATE to prevent concurrent requests from double-spending
+    the limit. Resets counters if the daily/monthly window has rolled over.
+    Raises HTTP 429 if the daily limit is already reached.
+    Must complete before StreamingResponse starts so the client gets a proper 429,
+    not an SSE error event mid-stream.
+    """
+    async with AsyncSessionLocal() as db:
+        async with db.begin():
+            stmt = select(User).where(User.id == user_id).with_for_update()
+            locked = (await db.execute(stmt)).scalar_one()
+
+            today = date.today()
+            if locked.daily_reset_at < today:
+                locked.daily_count = 0
+                locked.daily_reset_at = today
+            if locked.monthly_reset_at < today.replace(day=1):
+                locked.monthly_count = 0
+                locked.monthly_reset_at = today.replace(day=1)
+
+            if locked.daily_count >= DAILY_LIMIT:
+                raise HTTPException(status_code=429, detail="Daily limit reached")
+            locked.daily_count += 1
+            locked.monthly_count += 1
+
+
+async def _save_story(user_id: str, topic: str, story_text: str, audio_url: str | None, duration_min: int) -> None:
+    async with AsyncSessionLocal() as db:
+        db.add(Story(
+            user_id=user_id,
+            topic=topic,
+            story_text=story_text,
+            audio_url=audio_url,
+            duration_min=duration_min,
+        ))
+        await db.commit()
+
+
 # ── Request / response models ─────────────────────────────────────────────────
 
 class GenerateRequest(BaseModel):
@@ -314,7 +378,7 @@ _PROGRESS_NODES = {
 }
 
 
-async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
+async def _stream_graph(request: GenerateRequest, user_id: str | None = None) -> AsyncIterator[str]:
     """Run the LangGraph graph and yield SSE events at each node completion.
 
     stream_mode="updates" yields only the fields changed by each node, not the
@@ -399,6 +463,11 @@ async def _stream_graph(request: GenerateRequest) -> AsyncIterator[str]:
             audio_url = f"/audio/{content_hash}.mp3"
 
         if final_story:
+            if user_id:
+                try:
+                    await _save_story(user_id, request.topic, final_story, audio_url, request.duration_min)
+                except Exception as exc:
+                    logger.warning("Failed to save story: %s", exc)
             yield _sse({
                 "event": "done",
                 "final_story": final_story,
@@ -453,22 +522,26 @@ async def index(drop_old: bool = False) -> JSONResponse:
 
 
 @app.post("/generate")
-async def generate(request: GenerateRequest) -> StreamingResponse:
+async def generate(
+    request: GenerateRequest,
+    current_user: User = Depends(get_current_user),
+) -> StreamingResponse:
     """
     Generate a bedtime science story and stream progress via Server-Sent Events.
 
-    The client should open an EventSource (or use fetch with stream=true) and
-    listen for `data:` lines. Each line is a JSON object with an `event` field:
+    Requires a valid Bearer token. Usage is checked and reserved before streaming
+    starts so a 429 is returned as a proper HTTP response, not an SSE error event.
 
     - `node_done`  — a LangGraph node finished; includes `node`, `chapter`, `message`
     - `done`       — pipeline complete; includes `final_story` and `audio_url`
     - `error`      — something went wrong; includes `message`
     """
+    await _reserve_usage_or_raise(str(current_user.id))
     return StreamingResponse(
-        _stream_graph(request),
+        _stream_graph(request, str(current_user.id)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disable nginx buffering if behind a proxy
+            "X-Accel-Buffering": "no",
         },
     )

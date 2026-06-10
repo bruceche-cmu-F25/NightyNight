@@ -35,11 +35,15 @@ export const NODE_PROGRESS: Record<string, number> = {
   polish_story:      92,
 }
 
-export async function* streamGenerate(req: GenerateRequest, signal?: AbortSignal): AsyncGenerator<SSEEvent> {
+export async function* streamGenerate(req: GenerateRequest, signal?: AbortSignal, token?: string): AsyncGenerator<SSEEvent> {
   const resp = await fetch('/generate', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    },
     body: JSON.stringify(req),
+    credentials: 'include',
     signal,
   })
 
