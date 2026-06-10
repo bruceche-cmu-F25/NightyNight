@@ -28,6 +28,40 @@ logger = logging.getLogger(__name__)
 
 DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "5"))
 
+_R2_ENDPOINT   = os.environ.get("R2_ENDPOINT", "")
+_R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
+_R2_SECRET_KEY = os.environ.get("R2_SECRET_KEY", "")
+_R2_BUCKET     = os.environ.get("R2_BUCKET", "nightynight-audio")
+_R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL", "").rstrip("/")
+
+
+def _upload_to_r2(mp3_path: str, key: str) -> str | None:
+    """Upload MP3 to Cloudflare R2, return public/presigned URL or None on failure."""
+    if not _R2_ENDPOINT:
+        return None
+    try:
+        import boto3
+        client = boto3.client(
+            "s3",
+            endpoint_url=_R2_ENDPOINT,
+            aws_access_key_id=_R2_ACCESS_KEY,
+            aws_secret_access_key=_R2_SECRET_KEY,
+            region_name="auto",
+        )
+        with open(mp3_path, "rb") as f:
+            client.put_object(Bucket=_R2_BUCKET, Key=key, Body=f.read(), ContentType="audio/mpeg")
+        if _R2_PUBLIC_URL:
+            return f"{_R2_PUBLIC_URL}/{key}"
+        # Fallback: presigned URL valid for 7 days (until public URL is configured)
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": _R2_BUCKET, "Key": key},
+            ExpiresIn=7 * 24 * 3600,
+        )
+    except Exception as exc:
+        logger.warning("R2 upload failed, falling back to local: %s", exc)
+        return None
+
 # Sources directory is at the repo root: CountingStars/sources/
 _SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
 
@@ -455,8 +489,12 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
                     yield ": tts-pending\n\n"
                     await asyncio.sleep(5)
                 await synthesis_future
-                audio_url = f"/audio/{content_hash}.mp3"
-                logger.info("TTS synthesis complete.")
+                local_path = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
+                r2_url = await asyncio.get_running_loop().run_in_executor(
+                    None, _upload_to_r2, local_path, f"{content_hash}.mp3"
+                )
+                audio_url = r2_url or f"/audio/{content_hash}.mp3"
+                logger.info("TTS complete. audio_url=%s", audio_url)
             except Exception as exc:
                 logger.error("Background TTS synthesis failed: %s", exc)
         elif content_hash and os.path.exists(os.path.join(AUDIO_DIR, f"{content_hash}.mp3")):
