@@ -20,10 +20,11 @@ interface AuthContextType {
   accessToken: string | null
   user:        AuthUser | null
   loading:     boolean
-  login:            (email: string, password: string) => Promise<void>
-  register:         (email: string, password: string, displayName?: string) => Promise<void>
-  loginWithGoogle:  (idToken: string) => Promise<void>
-  logout:           () => Promise<void>
+  login:              (email: string, password: string) => Promise<void>
+  register:           (email: string, password: string, displayName?: string) => Promise<void>
+  loginWithGoogle:    (idToken: string) => Promise<void>
+  logout:             () => Promise<void>
+  updatePreferences:  (prefs: Partial<UserPrefs>) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextType | null>(null)
@@ -78,8 +79,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccessToken(null); setUser(null)
   }
 
+  const updatePreferences = async (prefs: Partial<UserPrefs>) => {
+    const res = await fetch('/auth/me', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${accessToken}` },
+      body: JSON.stringify(prefs),
+      credentials: 'include',
+    })
+    if (!res.ok) throw new Error('Failed to save preferences')
+    const updated = await res.json()
+    setUser(u => u ? { ...u, preferences: updated.preferences } : null)
+  }
+
   return (
-    <AuthContext.Provider value={{ accessToken, user, loading, login, register, loginWithGoogle, logout }}>
+    <AuthContext.Provider value={{ accessToken, user, loading, login, register, loginWithGoogle, logout, updatePreferences }}>
       {children}
     </AuthContext.Provider>
   )

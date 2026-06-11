@@ -7,6 +7,7 @@ import { THEMES } from './theme'
 import { streamGenerate, NODE_PROGRESS, GenerateRequest } from './api'
 import { useAuth } from './context/AuthContext'
 import ProtectedRoute from './components/ProtectedRoute'
+import OnboardingModal from './components/OnboardingModal'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import LibraryPage from './pages/LibraryPage'
@@ -53,6 +54,13 @@ const AUDIENCE_BG: Record<string, BackgroundMode> = {
 
 const THEME = THEMES.default
 
+const BG_MODES: { mode: BackgroundMode; label: string }[] = [
+  { mode: 'stars',  label: '✦ Stars'  },
+  { mode: 'aurora', label: '◈ Aurora' },
+  { mode: 'dreamy', label: '✿ Dreamy' },
+  { mode: 'galaxy', label: '✧ Galaxy' },
+]
+
 export default function App() {
   return (
     <Routes>
@@ -73,6 +81,7 @@ function MainApp() {
   const [bgMode,       setBgMode]       = useState<BackgroundMode>('stars')
   const [settings,     setSettings]     = useState<Settings>(DEFAULT_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [bgPickerOpen, setBgPickerOpen] = useState(false)
   const [phase,        setPhase]        = useState<Phase>('idle')
   const [status,       setStatus]       = useState('')
   const [progress,     setProgress]     = useState(0)
@@ -80,8 +89,24 @@ function MainApp() {
   const [audioUrl,     setAudioUrl]     = useState<string | null>(null)
   const [errorMsg,          setErrorMsg]          = useState('')
   const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
+  const [onboardingDone,    setOnboardingDone]    = useState(false)
 
-  const abortRef = useRef<AbortController | null>(null)
+  const abortRef    = useRef<AbortController | null>(null)
+  const bgPickerRef = useRef<HTMLDivElement>(null)
+
+  // Close bg picker on outside click
+  useEffect(() => {
+    if (!bgPickerOpen) return
+    const handler = (e: MouseEvent) => {
+      if (bgPickerRef.current && !bgPickerRef.current.contains(e.target as Node))
+        setBgPickerOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [bgPickerOpen])
+
+  // Show onboarding if first login (no preferences set yet)
+  const showOnboarding = !onboardingDone && !!user && !user.preferences.audience && !user.preferences.style
 
   // Load saved preferences from account on first login
   useEffect(() => {
@@ -169,6 +194,9 @@ function MainApp() {
         onBgChange={setBgMode}
       />
 
+      {/* ── Onboarding ── */}
+      {showOnboarding && <OnboardingModal onDone={() => setOnboardingDone(true)} />}
+
       {/* ── Top-right controls ── */}
       <div className="bg-toggle">
         <button
@@ -178,6 +206,40 @@ function MainApp() {
         >
           ⚙ Settings
         </button>
+
+        {/* Scene / bg picker */}
+        <div ref={bgPickerRef} style={{ position: 'relative' }}>
+          <button
+            className={`bg-toggle-btn ${BG_MODES.some(b => b.mode === bgMode) ? 'active' : ''}`}
+            onClick={() => setBgPickerOpen(v => !v)}
+            style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+          >
+            {BG_MODES.find(b => b.mode === bgMode)?.label ?? '◉ Scene'}
+          </button>
+          {bgPickerOpen && (
+            <div style={{
+              position: 'absolute', top: 'calc(100% + 6px)', right: 0,
+              background: 'rgba(8, 12, 22, 0.96)',
+              border: '1px solid rgba(255,255,255,0.1)',
+              borderRadius: '12px', padding: '0.4rem',
+              display: 'flex', flexDirection: 'column', gap: '0.25rem',
+              minWidth: '130px', zIndex: 20,
+              backdropFilter: 'blur(12px)',
+            }}>
+              {BG_MODES.map(({ mode, label }) => (
+                <button
+                  key={mode}
+                  className={`bg-toggle-btn ${bgMode === mode ? 'active' : ''}`}
+                  onClick={() => { setBgMode(mode); setBgPickerOpen(false) }}
+                  style={{ '--accent': THEME.accentColor, width: '100%', textAlign: 'left' } as React.CSSProperties}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
         <button
           className="bg-toggle-btn"
           onClick={() => navigate('/library')}
