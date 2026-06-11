@@ -23,7 +23,14 @@ _sslmode = _params.get("sslmode", ["disable"])[0]
 _clean_url = urlunparse(_parsed._replace(query=""))
 _connect_args = {"ssl": True} if _sslmode in ("require", "verify-ca", "verify-full") else {}
 
-engine = create_async_engine(_clean_url, echo=False, pool_pre_ping=True, connect_args=_connect_args)
+engine = create_async_engine(
+    _clean_url,
+    echo=False,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=5,
+    connect_args=_connect_args,
+)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

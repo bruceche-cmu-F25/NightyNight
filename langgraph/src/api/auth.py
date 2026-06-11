@@ -1,8 +1,10 @@
 import os
+import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from jose import JWTError, jwt
 import bcrypt as _bcrypt
 from pydantic import BaseModel
@@ -14,6 +16,19 @@ from db.models import Story, User
 from api.deps import JWT_ALGORITHM, JWT_SECRET, get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# ── In-memory rate limiter (per IP) ──────────────────────────────────────────
+_attempts: dict[str, list[float]] = defaultdict(list)
+_RL_WINDOW = 60   # seconds
+_RL_MAX    = 10   # attempts per window
+
+def _rate_limit(request: Request) -> None:
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    _attempts[ip] = [t for t in _attempts[ip] if now - t < _RL_WINDOW]
+    if len(_attempts[ip]) >= _RL_MAX:
+        raise HTTPException(status_code=429, detail="Too many attempts, please try again later")
+    _attempts[ip].append(now)
 
 _ACCESS_EXPIRE_MIN  = 15
 _REFRESH_EXPIRE_DAYS = 7
@@ -82,7 +97,8 @@ class RegisterBody(BaseModel):
 
 
 @router.post("/register", status_code=201)
-async def register(body: RegisterBody, response: Response, db: AsyncSession = Depends(get_db)):
+async def register(request: Request, body: RegisterBody, response: Response, db: AsyncSession = Depends(get_db)):
+    _rate_limit(request)
     email = _normalize(body.email)
     if (await db.execute(select(User).where(User.email == email))).scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -104,7 +120,8 @@ class LoginBody(BaseModel):
 
 
 @router.post("/login")
-async def login(body: LoginBody, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(request: Request, body: LoginBody, response: Response, db: AsyncSession = Depends(get_db)):
+    _rate_limit(request)
     email = _normalize(body.email)
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if not user or not user.hashed_password or not _verify(body.password, user.hashed_password):
