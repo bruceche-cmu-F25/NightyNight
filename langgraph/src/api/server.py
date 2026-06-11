@@ -145,6 +145,28 @@ def _prepare_tts_text(text: str) -> str:
 
 _HEADING_RE = re.compile(r'^\s*(#{1,3}\s+.+|[A-Z][A-Z\s\d:,\-]{10,})\s*$', re.MULTILINE)
 
+def _split_into_chapter_segments(text: str, n_chapters: int) -> list[str]:
+    """Split story text into n_chapters paragraph-proportional segments.
+
+    Stories are plain prose (no chapter headings per prompt rules), so we split
+    by distributing paragraphs as evenly as possible across the chapter count.
+    """
+    if n_chapters <= 1 or not text.strip():
+        return [_prepare_tts_text(text)]
+
+    clean = _prepare_tts_text(text)
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", clean) if p.strip()]
+    n = min(n_chapters, len(paragraphs))
+    if n <= 1:
+        return [clean]
+    base, remainder = divmod(len(paragraphs), n)
+    result, idx = [], 0
+    for i in range(n):
+        size = base + (1 if i < remainder else 0)
+        result.append("\n\n".join(paragraphs[idx: idx + size]))
+        idx += size
+    return result
+
 
 def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
     """Split text into (chunk, is_chapter_boundary) tuples.
@@ -260,11 +282,11 @@ ELEVENLABS_VOICES: dict[str, str] = {
 
 
 _AUDIENCE_SPEED: dict[str, float] = {
-    "children (ages 4–6)":  0.74,
-    "children (ages 7–12)": 0.79,
-    "children (ages 13+)":  0.83,
+    "children (ages 4–6)":  0.72,
+    "children (ages 7–12)": 0.77,
+    "children (ages 13+)":  0.82,
 }
-_DEFAULT_SPEED = 0.88
+_DEFAULT_SPEED = 0.84
 
 
 def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, bytes]:
@@ -305,6 +327,7 @@ def _synthesize_blocking(
     voice_name: str,
     out_path: str,
     audience: str = "",
+    num_chapters: int = 1,
 ) -> tuple[int, int]:
     """Synthesize story text to MP3. Ambient sound is played client-side.
 
@@ -314,12 +337,23 @@ def _synthesize_blocking(
 
     Returns (duration_ms, chunks_synthesized).
     """
+    import html
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
     speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
-    chunk_tuples = _chunk_text(_prepare_tts_text(story_text), max_chars=39000)
-    logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunk_tuples), speed)
+
+    if num_chapters > 1:
+        segments = [s.strip() for s in _split_into_chapter_segments(story_text, num_chapters) if s.strip()]
+        if len(segments) > 1:
+            tts_text = '<break time="1.5s" />'.join(html.escape(s, quote=False) for s in segments)
+        else:
+            tts_text = _prepare_tts_text(story_text)
+    else:
+        tts_text = _prepare_tts_text(story_text)
+
+    chunk_tuples = _chunk_text(tts_text, max_chars=39000)
+    logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f, chapters=%d)", len(chunk_tuples), speed, num_chapters)
 
     raw_results: dict[int, bytes] = {}
     with ThreadPoolExecutor(max_workers=min(len(chunk_tuples), 2)) as pool:
@@ -431,6 +465,7 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
         "style": request.style,
         "audience": request.audience,
         "domain": request.domain,
+        "tts_speed": _AUDIENCE_SPEED.get(request.audience, _DEFAULT_SPEED),
     }
 
     # Seed current_state with the inputs; nodes will fill in the rest.
@@ -458,6 +493,7 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
                             synthesis_future = loop.run_in_executor(
                                 None, _synthesize_blocking,
                                 polished, request.voice, audio_out, request.audience,
+                                current_state.get("num_chapters", 1),
                             )
                             logger.info("TTS synthesis started in background (parallel chunks).")
                         else:

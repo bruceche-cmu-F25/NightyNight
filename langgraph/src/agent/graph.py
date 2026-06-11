@@ -75,6 +75,8 @@ class StoryState(_StoryStateRequired, total=False):
     # Assembled in order by assemble_chapters
     completed_chapters: list[str]
 
+    tts_speed: float                    # set by caller; used by plan_story to calibrate word count
+
     final_story: Optional[str]         # set by polish_story
     # Annotated with last-wins reducer — parallel write_chapter nodes all emit this
     status_message: Annotated[Optional[str], lambda _, b: b]
@@ -98,6 +100,8 @@ _AUDIENCE_WPM: dict[str, int] = {
     "children (ages 13+)":  115,
 }
 _DEFAULT_WPM = 135
+_DEFAULT_SPEED: float = 0.84   # fallback when tts_speed not in state
+_TTS_HEADROOM: float = 0.95    # reserve ~5% for chapter pauses and natural breathing
 
 _AUDIENCE_MAX_WORDS_PER_CHAPTER: dict[str, int] = {
     "children (ages 4–6)":  650,
@@ -116,9 +120,16 @@ _AUDIENCE_MAX_CHAPTERS: dict[str, int] = {
 }
 
 
-def derive_story_params(duration_min: int, audience: str = "") -> tuple[int, int, int]:
+def derive_story_params(
+    duration_min: int,
+    audience: str = "",
+    tts_speed: float | None = None,
+) -> tuple[int, int, int]:
     """Return (num_chapters, target_total_words, words_per_chapter) for a given duration."""
     wpm = _AUDIENCE_WPM.get(audience, _DEFAULT_WPM)
+    speed = tts_speed if tts_speed is not None else _DEFAULT_SPEED
+    effective_wpm = wpm * speed          # keep float; int() only at final product
+
     max_ch = _AUDIENCE_MAX_CHAPTERS.get(audience, _DURATION_TO_CHAPTERS[-1][1])
 
     num_chapters = min(max_ch, _DURATION_TO_CHAPTERS[-1][1])
@@ -127,8 +138,10 @@ def derive_story_params(duration_min: int, audience: str = "") -> tuple[int, int
             num_chapters = min(max_ch, chapters)
             break
 
-    target_total_words = duration_min * wpm
+    target_total_words = int(duration_min * effective_wpm * _TTS_HEADROOM)
     words_per_chapter = target_total_words // num_chapters
+    words_per_chapter = _cap_words_per_chapter(audience=audience, words=words_per_chapter)
+    target_total_words = words_per_chapter * num_chapters  # re-sync after cap
     return num_chapters, target_total_words, words_per_chapter
 
 
@@ -332,7 +345,7 @@ def plan_story(state: StoryState) -> dict:
 
     audience = state["audience"]
     num_chapters, target_total_words, words_per_chapter = derive_story_params(
-        state["duration_min"], audience
+        state["duration_min"], audience, tts_speed=state.get("tts_speed")
     )
 
     plan_prompt = select_plan_prompt(audience)
