@@ -10,6 +10,7 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const [email,    setEmail]    = useState('')
   const [password, setPassword] = useState('')
+  const [showPw,   setShowPw]   = useState(false)
   const [error,    setError]    = useState('')
   const [loading,  setLoading]  = useState(false)
   const googleBtnRef = useRef<HTMLDivElement>(null)
@@ -79,15 +80,28 @@ export default function LoginPage() {
               required
               style={{ '--accent': ACCENT, marginBottom: '0.75rem' } as React.CSSProperties}
             />
-            <input
-              className="topic-input"
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              required
-              style={{ '--accent': ACCENT, marginBottom: '1rem' } as React.CSSProperties}
-            />
+            <div style={{ position: 'relative', marginBottom: '1rem' }}>
+              <input
+                className="topic-input"
+                type={showPw ? 'text' : 'password'}
+                placeholder="Password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                style={{ '--accent': ACCENT, paddingRight: '3.5rem', width: '100%', boxSizing: 'border-box' } as React.CSSProperties}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPw(v => !v)}
+                style={{
+                  position: 'absolute', right: '0.75rem', top: '50%', transform: 'translateY(-50%)',
+                  background: 'none', border: 'none', color: '#8099aa', cursor: 'pointer',
+                  fontSize: '0.78rem', padding: 0,
+                }}
+              >
+                {showPw ? 'Hide' : 'Show'}
+              </button>
+            </div>
             {error && <p className="error-text" style={{ marginBottom: '0.75rem' }}>{error}</p>}
             <button
               className="generate-btn"
