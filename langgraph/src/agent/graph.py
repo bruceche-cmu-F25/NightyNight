@@ -92,15 +92,16 @@ _DURATION_TO_CHAPTERS = [
     (25,  6),
 ]
 
-# Per-audience words-per-minute cap.
-# Young children need shorter chapters regardless of duration setting.
+# Natural voice WPM (measured: ~160 WPM at speed 1.0 for ElevenLabs voices).
+# Slightly higher values buffer against LLM word-count overshoot.
+# Formula: target_words = duration × natural_wpm × speed × headroom
 _AUDIENCE_WPM: dict[str, int] = {
-    "children (ages 4–6)":  65,   # ~500 words / chapter max
-    "children (ages 7–12)": 95,
-    "children (ages 13+)":  115,
+    "children (ages 4–6)":  155,
+    "children (ages 7–12)": 160,
+    "children (ages 13+)":  165,
 }
-_DEFAULT_WPM = 135
-_DEFAULT_SPEED: float = 0.84   # fallback when tts_speed not in state
+_DEFAULT_WPM = 170
+_DEFAULT_SPEED: float = 0.80   # fallback when tts_speed not in state
 _TTS_HEADROOM: float = 0.95    # reserve ~5% for chapter pauses and natural breathing
 
 _AUDIENCE_MAX_WORDS_PER_CHAPTER: dict[str, int] = {

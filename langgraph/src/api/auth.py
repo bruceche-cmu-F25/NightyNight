@@ -264,6 +264,7 @@ async def get_stories(
         {
             "id": str(s.id),
             "topic": s.topic,
+            "story_text": s.story_text,
             "audio_url": s.audio_url,
             "duration_min": s.duration_min,
             "created_at": s.created_at.isoformat(),

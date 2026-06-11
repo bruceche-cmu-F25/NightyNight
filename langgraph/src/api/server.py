@@ -282,11 +282,11 @@ ELEVENLABS_VOICES: dict[str, str] = {
 
 
 _AUDIENCE_SPEED: dict[str, float] = {
-    "children (ages 4–6)":  0.72,
-    "children (ages 7–12)": 0.77,
-    "children (ages 13+)":  0.82,
+    "children (ages 4–6)":  0.70,
+    "children (ages 7–12)": 0.75,
+    "children (ages 13+)":  0.80,
 }
-_DEFAULT_SPEED = 0.84
+_DEFAULT_SPEED = 0.80
 
 
 def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, bytes]:
@@ -337,7 +337,6 @@ def _synthesize_blocking(
 
     Returns (duration_ms, chunks_synthesized).
     """
-    import html
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
@@ -346,7 +345,7 @@ def _synthesize_blocking(
     if num_chapters > 1:
         segments = [s.strip() for s in _split_into_chapter_segments(story_text, num_chapters) if s.strip()]
         if len(segments) > 1:
-            tts_text = '<break time="1.5s" />'.join(html.escape(s, quote=False) for s in segments)
+            tts_text = ' <break time="2.5s" /> '.join(segments)
         else:
             tts_text = _prepare_tts_text(story_text)
     else:
