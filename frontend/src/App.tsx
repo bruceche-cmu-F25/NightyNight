@@ -108,13 +108,13 @@ function MainApp() {
   // Show onboarding if first login (no preferences set yet)
   const showOnboarding = !onboardingDone && !!user && !user.preferences.audience && !user.preferences.style
 
-  // Load saved preferences from account on first login
+  // Sync settings whenever saved preferences change (login or onboarding save)
   useEffect(() => {
     if (!user?.preferences) return
     if (user.preferences.voice)    setVoice(user.preferences.voice)
     if (user.preferences.audience) setSettings(s => ({ ...s, audience: user.preferences.audience! }))
     if (user.preferences.style)    setSettings(s => ({ ...s, style: user.preferences.style! }))
-  }, [user?.id])
+  }, [user?.preferences?.voice, user?.preferences?.audience, user?.preferences?.style])
 
   // Auto-switch background when audience changes
   useEffect(() => {
@@ -190,8 +190,6 @@ function MainApp() {
         onChange={setSettings}
         onClose={() => setSettingsOpen(false)}
         accent={THEME.accentColor}
-        bgMode={bgMode}
-        onBgChange={setBgMode}
       />
 
       {/* ── Onboarding ── */}
