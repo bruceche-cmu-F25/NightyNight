@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
+import gsap from 'gsap'
 import { Routes, Route, useNavigate } from 'react-router-dom'
 import StarField, { BackgroundMode } from './StarField'
 import SettingsDrawer, { Settings } from './SettingsDrawer'
@@ -91,8 +92,10 @@ function MainApp() {
   const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
   const [onboardingDone,    setOnboardingDone]    = useState(false)
 
-  const abortRef    = useRef<AbortController | null>(null)
-  const bgPickerRef = useRef<HTMLDivElement>(null)
+  const abortRef          = useRef<AbortController | null>(null)
+  const bgPickerRef       = useRef<HTMLDivElement>(null)
+  const idleCardRef       = useRef<HTMLDivElement>(null)
+  const generatingCardRef = useRef<HTMLDivElement>(null)
 
   // Close bg picker on outside click
   useEffect(() => {
@@ -120,6 +123,42 @@ function MainApp() {
   useEffect(() => {
     setBgMode(AUDIENCE_BG[settings.audience] ?? 'stars')
   }, [settings.audience])
+
+  // Effect 1: staggered entry when idle card mounts
+  useEffect(() => {
+    if (phase !== 'idle' || !idleCardRef.current) return
+    const targets = idleCardRef.current.querySelectorAll<HTMLElement>(
+      '.logo, .tagline, .topic-input, .options, .generate-btn'
+    )
+    const tween = gsap.from(targets, {
+      y: 24,
+      autoAlpha: 0,
+      duration: 1.4,
+      ease: 'power2.out',
+      stagger: 0.18,
+      clearProps: 'all',
+    })
+    return () => { tween.kill() }
+  }, [phase])
+
+  // Effect 2: breathing pulse while generating
+  useEffect(() => {
+    if (phase !== 'generating' || !generatingCardRef.current) return
+    const card = generatingCardRef.current
+    const logo = card.querySelector<HTMLElement>('.logo')
+    const hint = card.querySelector<HTMLElement>('.hint')
+    const tweens = [
+      logo && gsap.fromTo(logo,
+        { scale: 1, opacity: 0.75 },
+        { scale: 1.018, opacity: 1, duration: 3, ease: 'sine.inOut', repeat: -1, yoyo: true }
+      ),
+      hint && gsap.fromTo(hint,
+        { opacity: 0.2 },
+        { opacity: 0.55, duration: 2.2, ease: 'sine.inOut', repeat: -1, yoyo: true }
+      ),
+    ]
+    return () => { tweens.forEach(t => t && t.kill()) }
+  }, [phase])
 
   const handleGenerate = useCallback(async () => {
     if (!topic.trim()) return
@@ -259,7 +298,7 @@ function MainApp() {
 
         {/* ── Idle / Input ── */}
         {phase === 'idle' && (
-          <div className="card fade-in">
+          <div className="card" ref={idleCardRef}>
             <h1 className="logo">NightyNight</h1>
             <p className="tagline">A bedtime science story, made just for tonight.</p>
 
@@ -317,7 +356,7 @@ function MainApp() {
 
         {/* ── Generating ── */}
         {phase === 'generating' && (
-          <div className="card fade-in">
+          <div className="card" ref={generatingCardRef}>
             <h1 className="logo">NightyNight</h1>
             <p className="status-text">{status}</p>
             <div className="progress-track">
