@@ -29,13 +29,6 @@ const DEFAULT_SETTINGS: Settings = {
   style:    'gentle bedtime',
 }
 
-const BG_MODES: { mode: BackgroundMode; label: string }[] = [
-  { mode: 'stars',  label: '✦ Stars'  },
-  { mode: 'aurora', label: '◈ Aurora' },
-  { mode: 'dreamy', label: '✿ Dreamy' },
-  { mode: 'galaxy', label: '✧ Galaxy' },
-]
-
 const TOPIC_AMBIENT: [string[], string][] = [
   [['space', 'cosmos', 'star', 'planet', 'galaxy', 'universe', 'astro', 'nebula', 'moon', 'solar', 'orbit', 'nasa', 'rocket', 'comet', 'milky'], 'cosmos'],
   [['ocean', 'sea', 'wave', 'beach', 'marine', 'coral', 'fish', 'whale', 'deep', 'underwater', 'shark', 'tide'], 'ocean'],
@@ -172,20 +165,12 @@ function MainApp() {
         onChange={setSettings}
         onClose={() => setSettingsOpen(false)}
         accent={THEME.accentColor}
+        bgMode={bgMode}
+        onBgChange={setBgMode}
       />
 
       {/* ── Top-right controls ── */}
       <div className="bg-toggle">
-        {BG_MODES.map(({ mode, label }) => (
-          <button
-            key={mode}
-            className={`bg-toggle-btn ${bgMode === mode ? 'active' : ''}`}
-            onClick={() => setBgMode(mode)}
-            style={{ '--accent': THEME.accentColor } as React.CSSProperties}
-          >
-            {label}
-          </button>
-        ))}
         <button
           className="bg-toggle-btn"
           onClick={() => setSettingsOpen(true)}

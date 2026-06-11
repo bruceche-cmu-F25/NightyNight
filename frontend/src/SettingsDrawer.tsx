@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { BackgroundMode } from './StarField'
 
 export interface Settings {
   ambient:  string
@@ -7,12 +8,21 @@ export interface Settings {
 }
 
 interface Props {
-  open:     boolean
-  settings: Settings
-  onChange: (s: Settings) => void
-  onClose:  () => void
-  accent:   string
+  open:       boolean
+  settings:   Settings
+  onChange:   (s: Settings) => void
+  onClose:    () => void
+  accent:     string
+  bgMode:     BackgroundMode
+  onBgChange: (m: BackgroundMode) => void
 }
+
+const BG_MODES: { mode: BackgroundMode; label: string }[] = [
+  { mode: 'stars',  label: '✦ Stars'  },
+  { mode: 'aurora', label: '◈ Aurora' },
+  { mode: 'dreamy', label: '✿ Dreamy' },
+  { mode: 'galaxy', label: '✧ Galaxy' },
+]
 
 const AMBIENT_OPTIONS  = ['auto', 'fire', 'rain', 'ocean', 'woods', 'cosmos', 'none']
 const AUDIENCE_OPTIONS = [
@@ -23,12 +33,11 @@ const AUDIENCE_OPTIONS = [
   'children (ages 7–12)',
   'children (ages 13+)',
 ]
-const STYLE_OPTIONS    = ['gentle bedtime', 'calm documentary', 'soft storytelling']
+const STYLE_OPTIONS = ['gentle bedtime', 'calm documentary', 'soft storytelling']
 
-export default function SettingsDrawer({ open, settings, onChange, onClose, accent }: Props) {
+export default function SettingsDrawer({ open, settings, onChange, onClose, accent, bgMode, onBgChange }: Props) {
   const drawerRef = useRef<HTMLDivElement>(null)
 
-  // close on outside click
   useEffect(() => {
     if (!open) return
     const handler = (e: MouseEvent) => {
@@ -50,30 +59,38 @@ export default function SettingsDrawer({ open, settings, onChange, onClose, acce
         </div>
 
         <div className="drawer-body">
+          <label className="drawer-label" style={{ marginBottom: '0.5rem' }}>Background</label>
+          <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}>
+            {BG_MODES.map(({ mode, label }) => (
+              <button
+                key={mode}
+                onClick={() => onBgChange(mode)}
+                className={`bg-toggle-btn ${bgMode === mode ? 'active' : ''}`}
+                style={{ '--accent': accent } as React.CSSProperties}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
           <label className="drawer-label">
             Ambient sound
             <select className="drawer-select" value={settings.ambient} onChange={set('ambient')}>
-              {AMBIENT_OPTIONS.map(o => (
-                <option key={o} value={o}>{o}</option>
-              ))}
+              {AMBIENT_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
 
           <label className="drawer-label">
             Audience
             <select className="drawer-select" value={settings.audience} onChange={set('audience')}>
-              {AUDIENCE_OPTIONS.map(o => (
-                <option key={o} value={o}>{o}</option>
-              ))}
+              {AUDIENCE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
 
           <label className="drawer-label">
             Narration style
             <select className="drawer-select" value={settings.style} onChange={set('style')}>
-              {STYLE_OPTIONS.map(o => (
-                <option key={o} value={o}>{o}</option>
-              ))}
+              {STYLE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
         </div>
