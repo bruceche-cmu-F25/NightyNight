@@ -197,14 +197,6 @@ function MainApp() {
 
       {/* ── Top-right controls ── */}
       <div className="bg-toggle">
-        <button
-          className="bg-toggle-btn"
-          onClick={() => setSettingsOpen(true)}
-          style={{ '--accent': THEME.accentColor } as React.CSSProperties}
-        >
-          ⚙ Settings
-        </button>
-
         {/* Scene / bg picker */}
         <div ref={bgPickerRef} style={{ position: 'relative' }}>
           <button
@@ -245,6 +237,15 @@ function MainApp() {
         >
           ☰ Library
         </button>
+
+        <button
+          className="bg-toggle-btn"
+          onClick={() => setSettingsOpen(true)}
+          style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+        >
+          ⚙ Settings
+        </button>
+
         <button
           className="bg-toggle-btn"
           onClick={logout}
