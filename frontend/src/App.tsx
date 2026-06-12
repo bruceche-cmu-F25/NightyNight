@@ -141,20 +141,29 @@ function MainApp() {
     return () => { tween.kill() }
   }, [phase])
 
-  // Effect 2: breathing pulse while generating
+  // Effect 2: generating animations — logo glow, dot wave, shimmer sweep
   useEffect(() => {
     if (phase !== 'generating' || !generatingCardRef.current) return
-    const card = generatingCardRef.current
-    const logo = card.querySelector<HTMLElement>('.logo')
-    const hint = card.querySelector<HTMLElement>('.hint')
+    const card    = generatingCardRef.current
+    const logo    = card.querySelector<HTMLElement>('.logo')
+    const dots    = card.querySelectorAll<HTMLElement>('.dot')
+    const shimmer = card.querySelector<HTMLElement>('.progress-shimmer')
+
     const tweens = [
+      // Soft glow pulse — more visible than the previous 1.8% scale
       logo && gsap.fromTo(logo,
-        { scale: 1, opacity: 0.75 },
-        { scale: 1.018, opacity: 1, duration: 3, ease: 'sine.inOut', repeat: -1, yoyo: true }
+        { opacity: 0.55, textShadow: '0 0 20px rgba(180,180,255,0)' },
+        { opacity: 1, textShadow: '0 0 40px rgba(180,180,255,0.45)', duration: 3, ease: 'sine.inOut', repeat: -1, yoyo: true }
       ),
-      hint && gsap.fromTo(hint,
-        { opacity: 0.2 },
-        { opacity: 0.55, duration: 2.2, ease: 'sine.inOut', repeat: -1, yoyo: true }
+      // Three dots wave: each fades in 0.25 s after the previous
+      dots.length > 0 && gsap.fromTo(dots,
+        { autoAlpha: 0.15 },
+        { autoAlpha: 1, duration: 0.6, ease: 'sine.inOut', repeat: -1, yoyo: true, stagger: 0.25 }
+      ),
+      // Shimmer sweeps across the filled portion of the progress bar
+      shimmer && gsap.fromTo(shimmer,
+        { xPercent: -100 },
+        { xPercent: 200, duration: 1.8, ease: 'power1.inOut', repeat: -1, repeatDelay: 0.6 }
       ),
     ]
     return () => { tweens.forEach(t => t && t.kill()) }
@@ -363,9 +372,13 @@ function MainApp() {
               <div
                 className="progress-fill"
                 style={{ width: `${progress}%`, background: THEME.accentColor }}
-              />
+              >
+                <div className="progress-shimmer" />
+              </div>
             </div>
-            <p className="hint">Weaving your story…</p>
+            <p className="hint">
+              Weaving your story<span className="dot">.</span><span className="dot">.</span><span className="dot">.</span>
+            </p>
           </div>
         )}
 

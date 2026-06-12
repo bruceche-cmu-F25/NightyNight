@@ -351,7 +351,12 @@ def _synthesize_blocking(
     else:
         tts_text = _prepare_tts_text(story_text)
 
-    chunk_tuples = _chunk_text(tts_text, max_chars=39000)
+    # Send as one request when under ElevenLabs' 40k-char limit (the normal case).
+    # Raw-byte concatenation of multiple MP3s produces broken duration metadata in browsers.
+    if len(tts_text) <= 39000:
+        chunk_tuples = [(tts_text, False)]
+    else:
+        chunk_tuples = _chunk_text(tts_text, max_chars=39000)
     logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f, chapters=%d)", len(chunk_tuples), speed, num_chapters)
 
     raw_results: dict[int, bytes] = {}
