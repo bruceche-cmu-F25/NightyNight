@@ -96,6 +96,7 @@ function MainApp() {
   const bgPickerRef       = useRef<HTMLDivElement>(null)
   const idleCardRef       = useRef<HTMLDivElement>(null)
   const generatingCardRef = useRef<HTMLDivElement>(null)
+  const storyViewRef      = useRef<HTMLDivElement>(null)
 
   // Close bg picker on outside click
   useEffect(() => {
@@ -167,6 +168,21 @@ function MainApp() {
       ),
     ]
     return () => { tweens.forEach(t => t && t.kill()) }
+  }, [phase])
+
+  // Effect 3: staggered entrance when story view mounts
+  useEffect(() => {
+    if (phase !== 'done' || !storyViewRef.current) return
+    const view    = storyViewRef.current
+    const header  = view.querySelector('.story-header')
+    const player  = view.querySelector('.player')
+    const article = view.querySelector('.story-text')
+
+    const tl = gsap.timeline()
+    if (header)  tl.from(header,  { y: 18, autoAlpha: 0, duration: 0.55, ease: 'power2.out', clearProps: 'all' })
+    if (player)  tl.from(player,  { y: 18, autoAlpha: 0, duration: 0.55, ease: 'power2.out', clearProps: 'all' }, '-=0.3')
+    if (article) tl.from(article, { y: 18, autoAlpha: 0, duration: 0.7,  ease: 'power2.out', clearProps: 'all' }, '-=0.3')
+    return () => { tl.kill() }
   }, [phase])
 
   const handleGenerate = useCallback(async () => {
@@ -384,7 +400,7 @@ function MainApp() {
 
         {/* ── Done ── */}
         {phase === 'done' && (
-          <div className="story-view fade-in">
+          <div className="story-view" ref={storyViewRef}>
             <div className="story-header">
               <button className="back-btn" onClick={handleReset}>← New story</button>
               <button

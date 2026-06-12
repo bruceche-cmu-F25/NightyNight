@@ -300,70 +300,119 @@ export default function StarField({ mode }: Props) {
     return () => { cancelAnimationFrame(animId.current); clearTimeout(galaxyResizeTimer); window.removeEventListener('resize', onGalaxyResize) }
   }, [mode])
 
-  // ── Canvas stars (simple twinkling) ──────────────────────────────────────
+  // ── Canvas stars (3-layer depth, sprite cache, 30 fps cap) ──────────────
   useEffect(() => {
     if (mode !== 'stars') return
     const canvas = canvasRef.current!
     const ctx    = canvas.getContext('2d')!
 
-    const STAR_TINTS = [
-      '#ffffff', '#ffffff',
-      '#c1e1fa', '#92b4f1', '#f2cca4', '#f3f179', '#eccece', '#f0d0e0',
-    ]
+    const TINTS = ['#ffffff', '#c1e1fa', '#92b4f1', '#f2cca4', '#eccece', '#f0d0e0']
+    const rand  = (lo: number, hi: number) => Math.random() * (hi - lo) + lo
+    const pick  = () => TINTS[Math.floor(Math.random() * TINTS.length)]
 
-    const isMobile = () => window.innerWidth < 768
-    const COUNT    = isMobile() ? 140 : 300
+    // Pre-render a glow halo onto a tiny offscreen canvas once per star.
+    // Appending '00' to the hex colour gives a colour-correct transparent stop
+    // so there's no dark halo around coloured stars.
+    const makeSprite = (r: number, hex: string): HTMLCanvasElement => {
+      const glowR  = Math.ceil(r * 3.5)
+      const d      = glowR * 2
+      const oc     = document.createElement('canvas')
+      oc.width     = d
+      oc.height    = d
+      const oc2    = oc.getContext('2d')!
+      const g      = oc2.createRadialGradient(glowR, glowR, 0, glowR, glowR, glowR)
+      g.addColorStop(0, hex)
+      g.addColorStop(1, hex + '00')
+      oc2.beginPath(); oc2.arc(glowR, glowR, glowR, 0, Math.PI * 2)
+      oc2.fillStyle = g; oc2.fill()
+      return oc
+    }
 
-    const makeParticles = (w: number, h: number) =>
-      Array.from({ length: COUNT }, () => ({
-        x:       Math.random() * w,
-        y:       Math.random() * h,
-        vx:      (Math.random() - 0.5) * 0.12,
-        vy:      (Math.random() - 0.5) * 0.12,
-        r:       Math.random() * 2.2 + 0.6,
-        color:   STAR_TINTS[Math.floor(Math.random() * STAR_TINTS.length)],
+    interface Star {
+      x: number; y: number; vx: number; vy: number
+      r: number; color: string
+      opacity: number; delta: number
+      sprite: HTMLCanvasElement | null
+      glowR: number
+    }
+
+    const makeStar = (
+      w: number, h: number,
+      rLo: number, rHi: number,
+      speed: number,
+      glow: boolean,
+    ): Star => {
+      const r = rand(rLo, rHi); const color = pick()
+      return {
+        x: Math.random() * w, y: Math.random() * h,
+        vx: (Math.random() - 0.5) * 0.12 * speed,
+        vy: (Math.random() - 0.5) * 0.12 * speed,
+        r, color,
         opacity: Math.random(),
-        delta:   (Math.random() * 0.004 + 0.001) * (Math.random() < 0.5 ? 1 : -1),
-      }))
+        delta: rand(0.001, 0.005) * (Math.random() < 0.5 ? 1 : -1),
+        sprite: glow ? makeSprite(r, color) : null,
+        glowR:  glow ? Math.ceil(r * 3.5) : 0,
+      }
+    }
+
+    // Three depth layers drawn back-to-front: far stars behind, near in front.
+    const mobile  = window.innerWidth < 768
+    const makeAll = (w: number, h: number): Star[] => [
+      ...Array.from({ length: mobile ? 60 : 100 }, () => makeStar(w, h, 0.3, 0.9, 0.25, false)),
+      ...Array.from({ length: mobile ? 40 : 70  }, () => makeStar(w, h, 1.0, 1.6, 0.55, true)),
+      ...Array.from({ length: mobile ? 20 : 30  }, () => makeStar(w, h, 1.8, 2.8, 1.0,  true)),
+    ]
 
     canvas.width  = window.innerWidth
     canvas.height = window.innerHeight
-    let particles = makeParticles(canvas.width, canvas.height)
+    let stars     = makeAll(canvas.width, canvas.height)
 
     let resizeTimer: ReturnType<typeof setTimeout>
     const resize = () => {
       canvas.width  = window.innerWidth
       canvas.height = window.innerHeight
       clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => {
-        particles = makeParticles(canvas.width, canvas.height)
-      }, 150)
+      resizeTimer = setTimeout(() => { stars = makeAll(canvas.width, canvas.height) }, 150)
     }
     window.addEventListener('resize', resize, { passive: true })
 
-    const draw = () => {
+    let lastT    = 0
+    const FRAME_MS = 1000 / 30   // cap at 30 fps
+
+    const draw = (t: number) => {
+      animId.current = requestAnimationFrame(draw)
+      if (t - lastT < FRAME_MS) return
+      lastT = t
+
       ctx.clearRect(0, 0, canvas.width, canvas.height)
-      for (const p of particles) {
-        p.x += p.vx; p.y += p.vy
-        if (p.x < 0) p.x = canvas.width
-        if (p.x > canvas.width)  p.x = 0
-        if (p.y < 0) p.y = canvas.height
-        if (p.y > canvas.height) p.y = 0
-        p.opacity += p.delta
-        if (p.opacity >= 1 || p.opacity <= 0.05) p.delta *= -1
-        p.opacity = Math.max(0.05, Math.min(1, p.opacity))
-        ctx.beginPath()
-        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
-        ctx.fillStyle = p.color
-        ctx.globalAlpha = p.opacity * 0.8
-        ctx.fill()
+      for (const s of stars) {
+        s.x += s.vx; s.y += s.vy
+        if (s.x < 0) s.x = canvas.width
+        if (s.x > canvas.width)  s.x = 0
+        if (s.y < 0) s.y = canvas.height
+        if (s.y > canvas.height) s.y = 0
+
+        s.opacity += s.delta
+        if (s.opacity >= 1 || s.opacity <= 0.05) s.delta *= -1
+        s.opacity = Math.max(0.05, Math.min(1, s.opacity))
+
+        if (s.sprite) {
+          ctx.globalAlpha = s.opacity * 0.32
+          ctx.drawImage(s.sprite, s.x - s.glowR, s.y - s.glowR)
+        }
+        ctx.globalAlpha = s.opacity * (s.sprite ? 0.92 : 0.72)
+        ctx.fillStyle   = s.color
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill()
       }
       ctx.globalAlpha = 1
-      animId.current = requestAnimationFrame(draw)
     }
 
     animId.current = requestAnimationFrame(draw)
-    return () => { cancelAnimationFrame(animId.current); clearTimeout(resizeTimer); window.removeEventListener('resize', resize) }
+    return () => {
+      cancelAnimationFrame(animId.current)
+      clearTimeout(resizeTimer)
+      window.removeEventListener('resize', resize)
+    }
   }, [mode])
 
   return (
