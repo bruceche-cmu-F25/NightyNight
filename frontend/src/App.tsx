@@ -12,6 +12,7 @@ import OnboardingModal from './components/OnboardingModal'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import LibraryPage from './pages/LibraryPage'
+import LandingPage from './pages/LandingPage'
 
 type Phase = 'idle' | 'generating' | 'done' | 'error'
 
@@ -65,6 +66,7 @@ const BG_MODES: { mode: BackgroundMode; label: string }[] = [
 export default function App() {
   return (
     <Routes>
+      <Route path="/"         element={<LandingPage />} />
       <Route path="/login"    element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/library"  element={<ProtectedRoute><LibraryPage /></ProtectedRoute>} />
@@ -365,11 +367,23 @@ function MainApp() {
               type="text"
               placeholder="What do you want to dream about tonight?"
               value={topic}
+              maxLength={200}
               onChange={e => setTopic(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleGenerate()}
               autoFocus
               style={{ '--accent': THEME.accentColor } as React.CSSProperties}
             />
+            {topic.length > 0 && (
+              <p style={{
+                alignSelf: 'flex-end',
+                marginTop: '-1rem',
+                fontSize: '0.7rem',
+                color: topic.length >= 180 ? '#e09977' : 'rgba(180,180,200,0.3)',
+                letterSpacing: '0.04em',
+              }}>
+                {topic.length}/200
+              </p>
+            )}
 
             <div className="options">
               <label className="option-label">

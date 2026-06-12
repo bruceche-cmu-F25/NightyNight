@@ -1,8 +1,11 @@
 import os
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
+
+_EMAIL_RE = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from jose import JWTError, jwt
@@ -100,6 +103,12 @@ class RegisterBody(BaseModel):
 async def register(request: Request, body: RegisterBody, response: Response, db: AsyncSession = Depends(get_db)):
     _rate_limit(request)
     email = _normalize(body.email)
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=422, detail="Invalid email address")
+    if len(body.password) < 5:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    if len(body.password) > 128:
+        raise HTTPException(status_code=422, detail="Password is too long")
     if (await db.execute(select(User).where(User.email == email))).scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
 

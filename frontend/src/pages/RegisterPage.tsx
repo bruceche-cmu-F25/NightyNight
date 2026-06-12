@@ -9,7 +9,7 @@ function emailValid(e: string) {
 }
 
 function pwStrength(p: string): number {
-  if (p.length < 8) return 0
+  if (p.length < 5) return 0
   let score = 1
   if (/[A-Z]/.test(p) || /[0-9]/.test(p)) score++
   if (/[^A-Za-z0-9]/.test(p) && /[0-9]/.test(p)) score++
@@ -46,12 +46,12 @@ export default function RegisterPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!emailValid(email)) { setError('Please enter a valid email address'); return }
-    if (password.length < 8) { setError('Password must be at least 8 characters'); return }
+    if (password.length < 5) { setError('Password must be at least 8 characters'); return }
     if (password !== confirm) { setError('Passwords do not match'); return }
     setError('')
     setLoading(true)
     try {
-      await register(email, password, name.trim() || undefined)
+      await register(email.trim().toLowerCase(), password, name.trim() || undefined)
       navigate('/app')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed')
@@ -105,6 +105,7 @@ export default function RegisterPage() {
                 type={showPw ? 'text' : 'password'}
                 placeholder="Password"
                 value={password}
+                maxLength={128}
                 onChange={e => setPassword(e.target.value)}
                 required
                 style={{ '--accent': ACCENT, paddingRight: '3.5rem', width: '100%', boxSizing: 'border-box' } as React.CSSProperties}
@@ -146,6 +147,7 @@ export default function RegisterPage() {
                 type={showConfirm ? 'text' : 'password'}
                 placeholder="Confirm password"
                 value={confirm}
+                maxLength={128}
                 onChange={e => setConfirm(e.target.value)}
                 required
                 style={{

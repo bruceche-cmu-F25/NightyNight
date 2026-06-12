@@ -22,7 +22,7 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      await login(email, password)
+      await login(email.trim().toLowerCase(), password)
       navigate('/app')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
@@ -86,6 +86,7 @@ export default function LoginPage() {
                 type={showPw ? 'text' : 'password'}
                 placeholder="Password"
                 value={password}
+                maxLength={128}
                 onChange={e => setPassword(e.target.value)}
                 required
                 style={{ '--accent': ACCENT, paddingRight: '3.5rem', width: '100%', boxSizing: 'border-box' } as React.CSSProperties}

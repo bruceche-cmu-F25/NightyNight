@@ -3,13 +3,18 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import AsyncIterator
+from urllib.parse import quote
 
 from dotenv import load_dotenv
+
+load_dotenv()  # must run before any os.environ.get() calls below
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -69,8 +74,6 @@ _SOURCES_DIR = str(Path(__file__).resolve().parents[3] / "sources")
 _SOUNDS_DIR = os.environ.get("SOUNDS_DIR", str(Path(__file__).resolve().parents[3] / "sounds"))
 
 
-load_dotenv()
-
 _agent_logger = logging.getLogger("agent")
 _agent_logger.setLevel(logging.INFO)
 if not _agent_logger.handlers:
@@ -89,13 +92,6 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CountingStars API", version="0.1.0", lifespan=lifespan)
 
 app.include_router(auth_router)
-
-# @app.on_event("startup")
-# async def auto_index_on_startup() -> None:
-#     """Milvus auto-index on startup — disabled (RAG not in use)."""
-#     from pymilvus import connections, utility
-#     from agent.graph import _MILVUS_URI, _MILVUS_TOKEN, _MILVUS_COLLECTION
-#     ...  # kept for reference; re-enable if RAG is restored
 
 _FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
 
@@ -272,9 +268,6 @@ def _pick_ambient_url(ambient: str) -> str | None:
     Prefers the R2 public URL when configured; falls back to the local
     /sounds StaticFiles mount for local development.
     """
-    import random
-    from urllib.parse import quote
-
     files = _AMBIENT_MANIFEST.get(ambient)
     if not files:
         return None
@@ -284,7 +277,8 @@ def _pick_ambient_url(ambient: str) -> str | None:
     return f"/sounds/{ambient}/{quote(filename)}"
 
 
-_ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+_ELEVENLABS_TTS_URL  = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+_ELEVENLABS_MAX_CHARS = 39_000  # ElevenLabs hard limit per request
 
 # Curated ElevenLabs voices for bedtime narration.
 # Keys are the friendly names shown in the UI; values are stable voice IDs.
@@ -379,10 +373,10 @@ def _synthesize_blocking(
 
     # Send as one request when under ElevenLabs' 40k-char limit (the normal case).
     # Raw-byte concatenation of multiple MP3s produces broken duration metadata in browsers.
-    if len(tts_text) <= 39000:
+    if len(tts_text) <= _ELEVENLABS_MAX_CHARS:
         chunk_tuples = [(tts_text, False)]
     else:
-        chunk_tuples = _chunk_text(tts_text, max_chars=39000)
+        chunk_tuples = _chunk_text(tts_text, max_chars=_ELEVENLABS_MAX_CHARS)
     logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f, chapters=%d)", len(chunk_tuples), speed, num_chapters)
 
     raw_results: dict[int, bytes] = {}

@@ -46,15 +46,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const _post = async (path: string, body: object) => {
-    const res = await fetch(path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      credentials: 'include',
-    })
+    let res: Response
+    try {
+      res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'include',
+      })
+    } catch {
+      throw new Error('Network error — please check your connection')
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Request failed' }))
-      throw new Error(err.detail || 'Request failed')
+      const msg = Array.isArray(err.detail)
+        ? (err.detail[0]?.msg ?? 'Request failed')
+        : (err.detail || 'Request failed')
+      throw new Error(msg)
     }
     return res.json()
   }
