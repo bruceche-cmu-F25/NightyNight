@@ -244,18 +244,44 @@ def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
     return [(c, b) for c, b in result if c]
 
 
-def _pick_ambient_file(ambient: str) -> str | None:
-    """Return a random audio file from the ambient subfolder, or None if not found."""
-    import random
+_AMBIENT_MANIFEST: dict[str, list[str]] = {
+    "cosmos": [
+        "cosmos01.wav", "cosmos02.wav", "cosmos03.wav",
+        "cosmos04.wav", "cosmos05.wav",
+    ],
+    "fire": [
+        "LightFire01.mp3", "fire01.mp3", "fire02.mp3",
+        "fire03.mp3", "fire04.mp3", "fire05.mp3",
+    ],
+    "ocean": ["ocean01.mp3"],
+    "rain": [
+        "Light rain recordings mixed settings-01.wav",
+        "Light rain recordings mixed settings-02.wav",
+        "Light rain recordings mixed settings-03.wav",
+        "Light rain recordings mixed settings-04.wav",
+        "Light rain recordings mixed settings-05.wav",
+        "Light rain recordings mixed settings-06.wav",
+    ],
+    "woods": ["woods01.mp3", "woods02.mp3", "woods03.mp3"],
+}
 
-    subfolder = Path(_SOUNDS_DIR) / ambient
-    if not subfolder.is_dir():
+
+def _pick_ambient_url(ambient: str) -> str | None:
+    """Return a URL for a random ambient file in the given category.
+
+    Prefers the R2 public URL when configured; falls back to the local
+    /sounds StaticFiles mount for local development.
+    """
+    import random
+    from urllib.parse import quote
+
+    files = _AMBIENT_MANIFEST.get(ambient)
+    if not files:
         return None
-    files = [
-        f for f in subfolder.iterdir()
-        if f.suffix.lower() in (".mp3", ".wav", ".ogg", ".flac")
-    ]
-    return str(random.choice(files)) if files else None
+    filename = random.choice(files)
+    if _R2_PUBLIC_URL:
+        return f"{_R2_PUBLIC_URL}/sounds/{ambient}/{quote(filename)}"
+    return f"/sounds/{ambient}/{quote(filename)}"
 
 
 _ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
@@ -570,16 +596,15 @@ async def health() -> dict:
 
 @app.get("/ambient/{category}")
 async def ambient_random(category: str):
-    """Redirect to a random audio file from the given ambient category folder.
+    """Redirect to a random ambient audio file for the given category.
 
-    Uses RedirectResponse → /sounds/... so the StaticFiles mount handles the
-    actual file transfer, including Range requests (needed for audio seeking).
+    Serves from Cloudflare R2 (when R2_PUBLIC_URL is set) or the local
+    /sounds StaticFiles mount as a fallback for local development.
     """
-    file_path = _pick_ambient_file(category)
-    if not file_path:
+    url = _pick_ambient_url(category)
+    if not url:
         raise HTTPException(status_code=404, detail=f"No audio files found for category: {category}")
-    rel = Path(file_path).relative_to(Path(_SOUNDS_DIR))
-    return RedirectResponse(url=f"/sounds/{rel}", status_code=302)
+    return RedirectResponse(url=url, status_code=302)
 
 
 @app.post("/index")
