@@ -97,6 +97,9 @@ function MainApp() {
   const idleCardRef       = useRef<HTMLDivElement>(null)
   const generatingCardRef = useRef<HTMLDivElement>(null)
   const storyViewRef      = useRef<HTMLDivElement>(null)
+  const audioRef          = useRef<HTMLAudioElement>(null)
+  const progressTweenRef  = useRef<gsap.core.Tween | null>(null)
+  const progressProxy     = useRef({ value: 0 })
 
   // Close bg picker on outside click
   useEffect(() => {
@@ -185,6 +188,12 @@ function MainApp() {
     return () => { tl.kill() }
   }, [phase])
 
+  // Effect 4: auto-play audio when URL arrives
+  useEffect(() => {
+    if (!audioUrl || !audioRef.current) return
+    audioRef.current.play().catch(() => {})
+  }, [audioUrl])
+
   const handleGenerate = useCallback(async () => {
     if (!topic.trim()) return
 
@@ -208,13 +217,36 @@ function MainApp() {
       voice,
     }
 
+    const startCreep = (from: number, to: number, duration: number) => {
+      progressTweenRef.current?.kill()
+      progressProxy.current.value = from
+      progressTweenRef.current = gsap.to(progressProxy.current, {
+        value: to, duration, ease: 'none',
+        onUpdate: () => {
+          const v = Math.round(progressProxy.current.value)
+          setProgress(p => v > p ? v : p)
+        },
+      })
+    }
+
     try {
       for await (const ev of streamGenerate(req, ctrl.signal, accessToken ?? undefined)) {
         if (ev.event === 'node_done') {
           const pct = NODE_PROGRESS[ev.node] ?? 0
+          progressTweenRef.current?.kill()
           setProgress(p => Math.max(p, pct))
-          setStatus(ev.message || ev.node)
+
+          if (ev.node === 'assemble_chapters') {
+            setStatus('Polishing story…')
+            startCreep(pct, 91, 90)          // creep 80→91 over 90 s
+          } else if (ev.node === 'polish_story') {
+            setStatus('Synthesizing audio…')
+            startCreep(pct, 99, 60)          // creep 92→99 over 60 s
+          } else {
+            setStatus(ev.message || ev.node)
+          }
         } else if (ev.event === 'done') {
+          progressTweenRef.current?.kill()
           setProgress(100)
           setStory(ev.final_story)
           setAudioUrl(ev.audio_url)
@@ -232,6 +264,7 @@ function MainApp() {
 
   const handleReset = () => {
     abortRef.current?.abort()
+    progressTweenRef.current?.kill()
     setPhase('idle')
     setStory('')
     setAudioUrl(null)
@@ -421,7 +454,7 @@ function MainApp() {
 
             {audioUrl && (
               <div className="player">
-                <audio controls src={audioUrl} />
+                <audio ref={audioRef} controls src={audioUrl} />
               </div>
             )}
 

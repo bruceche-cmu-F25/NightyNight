@@ -356,11 +356,12 @@ export default function StarField({ mode }: Props) {
     }
 
     // Three depth layers drawn back-to-front: far stars behind, near in front.
+    // Desktop: 150 far + 110 mid + 40 near = 300. Mobile: 90+55+20 = 165.
     const mobile  = window.innerWidth < 768
     const makeAll = (w: number, h: number): Star[] => [
-      ...Array.from({ length: mobile ? 60 : 100 }, () => makeStar(w, h, 0.3, 0.9, 0.25, false)),
-      ...Array.from({ length: mobile ? 40 : 70  }, () => makeStar(w, h, 1.0, 1.6, 0.55, true)),
-      ...Array.from({ length: mobile ? 20 : 30  }, () => makeStar(w, h, 1.8, 2.8, 1.0,  true)),
+      ...Array.from({ length: mobile ? 90  : 150 }, () => makeStar(w, h, 0.3, 0.9, 0.25, false)),
+      ...Array.from({ length: mobile ? 55  : 110 }, () => makeStar(w, h, 1.0, 1.6, 0.55, true)),
+      ...Array.from({ length: mobile ? 20  : 40  }, () => makeStar(w, h, 1.8, 2.8, 1.0,  true)),
     ]
 
     canvas.width  = window.innerWidth
