@@ -15,8 +15,6 @@ export default function LoginPage() {
   const [loading,  setLoading]  = useState(false)
   const googleBtnRef = useRef<HTMLDivElement>(null)
 
-  if (accessToken) return <Navigate to="/app" replace />
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
@@ -62,6 +60,9 @@ export default function LoginPage() {
       (window as any).onGoogleLibraryLoad = init
     }
   }, [])
+
+  if (accessToken) return <Navigate to="/app" replace />
+
 
   return (
     <div className="root" style={{ background: 'radial-gradient(ellipse at 50% 80%, #0a0f1a 0%, #050810 60%, #020408 100%)' }}>

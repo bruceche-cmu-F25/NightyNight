@@ -452,8 +452,6 @@ export default function LandingPage() {
   const surfaceRef  = useRef<HTMLDivElement>(null)
   const blackoutRef = useRef<HTMLDivElement>(null)
 
-  if (!loading && accessToken) return <Navigate to="/app" replace />
-
   // Imperatively update overlay opacity — no React state → no re-renders per frame
   const handleProgress = useCallback((p: number) => {
     if (heroRef.current) {
@@ -479,6 +477,8 @@ export default function LandingPage() {
       blackoutRef.current.style.opacity = String(cover)
     }
   }, [])
+
+  if (!loading && accessToken) return <Navigate to="/app" replace />
 
   return (
     <div style={{ background: '#020408', color: '#e8e8f0' }}>
