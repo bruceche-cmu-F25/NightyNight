@@ -96,7 +96,6 @@ function MainApp() {
 
   const abortRef          = useRef<AbortController | null>(null)
   const bgPickerRef       = useRef<HTMLDivElement>(null)
-  const idleCardRef       = useRef<HTMLDivElement>(null)
   const generatingCardRef = useRef<HTMLDivElement>(null)
   const storyViewRef      = useRef<HTMLDivElement>(null)
   const audioRef          = useRef<HTMLAudioElement>(null)
@@ -129,23 +128,6 @@ function MainApp() {
   useEffect(() => {
     setBgMode(AUDIENCE_BG[settings.audience] ?? 'stars')
   }, [settings.audience])
-
-  // Effect 1: staggered entry when idle card mounts
-  useEffect(() => {
-    if (phase !== 'idle' || !idleCardRef.current) return
-    const targets = idleCardRef.current.querySelectorAll<HTMLElement>(
-      '.logo, .tagline, .topic-input, .options, .generate-btn'
-    )
-    const tween = gsap.from(targets, {
-      y: 24,
-      autoAlpha: 0,
-      duration: 1.4,
-      ease: 'power2.out',
-      stagger: 0.18,
-      clearProps: 'all',
-    })
-    return () => { tween.kill() }
-  }, [phase])
 
   // Effect 2: generating animations — logo glow, dot wave, shimmer sweep
   useEffect(() => {
@@ -358,7 +340,7 @@ function MainApp() {
 
         {/* ── Idle / Input ── */}
         {phase === 'idle' && (
-          <div className="card" ref={idleCardRef}>
+          <div className="card">
             <h1 className="logo">NightyNight</h1>
             <p className="tagline">A bedtime science story, made just for tonight.</p>
 
