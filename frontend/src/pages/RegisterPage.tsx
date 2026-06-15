@@ -64,7 +64,9 @@ export default function RegisterPage() {
     <div className="root" style={{ background: 'radial-gradient(ellipse at 50% 80%, #0a0f1a 0%, #050810 60%, #020408 100%)' }}>
       <div className="content">
         <div className="card fade-in">
-          <h1 className="logo">NightyNight</h1>
+          <Link to="/" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <h1 className="logo">NightyNight</h1>
+          </Link>
           <p className="tagline">Create your account</p>
 
           <form onSubmit={handleSubmit} style={{ width: '100%' }}>
