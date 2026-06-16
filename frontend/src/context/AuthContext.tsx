@@ -7,13 +7,16 @@ export interface UserPrefs {
 }
 
 export interface AuthUser {
-  id:           string
-  email:        string
-  display_name: string | null
-  preferences:  UserPrefs
-  daily_count:  number
-  monthly_count: number
-  story_count?: number
+  id:                  string
+  email:               string
+  display_name:        string | null
+  preferences:         UserPrefs
+  daily_count:         number
+  monthly_count:       number
+  story_count?:        number
+  plan:                'free' | 'premium'
+  subscription_status: string
+  is_premium:          boolean
 }
 
 interface AuthContextType {

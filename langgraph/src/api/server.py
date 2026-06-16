@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import hashlib
 import json
 import logging
 import os
 import random
 import re
+import requests
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -15,7 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # must run before any os.environ.get() calls below
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,11 +29,17 @@ from agent.graph import StoryState, graph, ingest_sources
 from api.auth import router as auth_router
 from api.deps import get_current_user
 from db.database import AsyncSessionLocal, Base, engine, get_db
-from db.models import Story, User
+from db.models import Story, User, user_is_premium
 
 logger = logging.getLogger(__name__)
 
-DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "5"))
+DAILY_LIMIT   = int(os.environ.get("DAILY_LIMIT", "5"))
+_ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+
+
+def _require_admin(x_admin_secret: str = Header(default="")) -> None:
+    if not _ADMIN_SECRET or x_admin_secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 _R2_ENDPOINT   = os.environ.get("R2_ENDPOINT", "")
 _R2_ACCESS_KEY = os.environ.get("R2_ACCESS_KEY", "")
@@ -311,8 +319,6 @@ _DEFAULT_SPEED = 0.80
 
 def _synthesize_chunk(idx: int, chunk: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> tuple[int, bytes]:
     """Call ElevenLabs TTS and return raw MP3 bytes."""
-    import requests
-
     url = _ELEVENLABS_TTS_URL.format(voice_id=voice_id)
     payload = {
         "text": chunk,
@@ -400,6 +406,119 @@ def _synthesize_blocking(
     return duration_ms, len(chunk_tuples)
 
 
+# ── Inworld TTS ───────────────────────────────────────────────────────────────
+
+_INWORLD_TTS_URL      = "https://api.inworld.ai/tts/v1/voice:stream"
+_INWORLD_MAX_CHARS    = 1_800   # hard limit 2000; 200 char safety margin
+_INWORLD_API_KEY      = os.environ.get("INWORLD_API_KEY", "")
+_INWORLD_DEFAULT_VOICE = "Blake"
+
+INWORLD_VOICES: dict[str, str] = {
+    "Blake (warm, intimate male)":    "Blake",
+    "Craig (refined British male)":   "Craig",
+    "Clive (calm, British male)":     "Clive",
+}
+
+
+def _inworld_chunk_bytes(text: str, voice_id: str, api_key: str, break_ms: int = 0, speed: float = _DEFAULT_SPEED) -> bytes:
+    """Synthesize one chunk (≤1800 chars) via Inworld, return raw MP3 bytes.
+
+    break_ms > 0 appends an SSML <break> tag so Inworld generates the silence
+    itself — no raw-byte silence padding needed.
+    """
+    if not api_key:
+        raise RuntimeError("INWORLD_API_KEY is missing")
+    if len(text) > _INWORLD_MAX_CHARS:
+        raise ValueError(f"Inworld chunk too long: {len(text)} chars")
+
+    if break_ms > 0:
+        body_key   = "ssml"
+        body_value = f'<speak>{text}<break time="{break_ms}ms"/></speak>'
+    else:
+        body_key   = "text"
+        body_value = text
+
+    resp = requests.post(
+        _INWORLD_TTS_URL,
+        headers={
+            "Authorization": f"Basic {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            body_key:      body_value,
+            "voiceId":     voice_id,
+            "audioConfig": {"audioEncoding": "MP3", "speakingRate": speed},
+            "modelId":     "inworld-tts-1.5-max",
+        },
+        stream=True,
+        timeout=120,
+    )
+    resp.raise_for_status()
+
+    parts: list[bytes] = []
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        data = json.loads(line)
+        result = data.get("result") or {}
+        b64 = (
+            result.get("audioContent")
+            or result.get("audio")
+            or data.get("audioContent")
+            or data.get("audio")
+        )
+        if b64:
+            parts.append(base64.b64decode(b64))
+
+    if not parts:
+        raise RuntimeError("Inworld returned no audio chunks")
+    return b"".join(parts)
+
+
+def _synthesize_inworld_blocking(
+    story_text: str,
+    voice_name: str,
+    out_path: str,
+    audience: str = "",
+    num_chapters: int = 1,
+) -> tuple[int, int]:
+    """Inworld TTS: clean → chunk → synthesize sequentially → write single MP3.
+
+    Same signature as _synthesize_blocking so the call site swap is minimal.
+    Returns (duration_ms_estimate, chunks_synthesized).
+    """
+    _valid_inworld = set(INWORLD_VOICES.values())
+    voice_id = voice_name if voice_name in _valid_inworld else _INWORLD_DEFAULT_VOICE
+    speed    = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
+
+    # Clean FIRST, then chunk — avoids chunk boundaries landing inside markdown artifacts
+    tts_text = _prepare_tts_text(story_text)
+    chunks   = _chunk_text(tts_text, max_chars=_INWORLD_MAX_CHARS)
+
+    logger.info("Inworld TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunks), speed)
+    all_bytes: list[bytes] = []
+    last_idx = len(chunks) - 1
+    for i, (chunk_text, is_boundary) in enumerate(chunks):
+        # Append silence via SSML break — chapter boundary gets 2.5s (matches
+        # ElevenLabs), regular paragraph gets 1.5s, last chunk gets none.
+        if i == last_idx:
+            break_ms = 0
+        elif is_boundary:
+            break_ms = 2500
+        else:
+            break_ms = 1500
+        audio = _inworld_chunk_bytes(chunk_text, voice_id, _INWORLD_API_KEY, break_ms, speed)
+        all_bytes.append(audio)
+        logger.info("Inworld TTS: chunk %d/%d done (%d KB)", i + 1, len(chunks), len(audio) // 1024)
+
+    with open(out_path, "wb") as f:
+        f.write(b"".join(all_bytes))
+
+    words       = len(tts_text.split())
+    duration_ms = int(words / 160 * 60_000)  # ~160 WPM at Inworld default speed
+    return duration_ms, len(chunks)
+
+
 # ── Auth / usage helpers ──────────────────────────────────────────────────────
 
 async def _reserve_usage_or_raise(user_id: str) -> None:
@@ -470,7 +589,7 @@ _PROGRESS_NODES = {
 }
 
 
-async def _stream_graph(request: GenerateRequest, user_id: str | None = None) -> AsyncIterator[str]:
+async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is_premium: bool = False) -> AsyncIterator[str]:
     """Run the LangGraph graph and yield SSE events at each node completion.
 
     stream_mode="updates" yields only the fields changed by each node, not the
@@ -510,16 +629,28 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
                 if node_name == "polish_story" and synthesis_future is None:
                     polished = current_state.get("final_story")
                     if polished:
-                        content_hash = hashlib.sha256(polished.encode()).hexdigest()[:16]
+                        _tier = "premium" if is_premium else "free"
+                        content_hash = hashlib.sha256(f"{_tier}:{polished}".encode()).hexdigest()[:16]
                         audio_out = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
                         if not os.path.exists(audio_out):
                             loop = asyncio.get_running_loop()
-                            synthesis_future = loop.run_in_executor(
-                                None, _synthesize_blocking,
-                                polished, request.voice, audio_out, request.audience,
-                                current_state.get("num_chapters", 1),
-                            )
-                            logger.info("TTS synthesis started in background (parallel chunks).")
+                            if is_premium:
+                                tts_provider = "elevenlabs"
+                                tts_voice    = request.voice
+                                synthesis_future = loop.run_in_executor(
+                                    None, _synthesize_blocking,
+                                    polished, tts_voice, audio_out, request.audience,
+                                    current_state.get("num_chapters", 1),
+                                )
+                            else:
+                                tts_provider = "inworld"
+                                tts_voice    = request.voice
+                                synthesis_future = loop.run_in_executor(
+                                    None, _synthesize_inworld_blocking,
+                                    polished, tts_voice, audio_out, request.audience,
+                                    current_state.get("num_chapters", 1),
+                                )
+                            logger.info("[tts] provider=%s premium=%s voice=%s", tts_provider, is_premium, tts_voice)
                         else:
                             logger.info("TTS cache hit — skipping synthesis.")
 
@@ -539,7 +670,8 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
 
         # Graph complete — await TTS (may already be done by now)
         final_story = current_state.get("final_story")
-        audio_url: str | None = None
+        audio_url:  str | None = None
+        tts_error:  str | None = None
 
         if synthesis_future is not None:
             try:
@@ -553,10 +685,12 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
                 r2_url = await asyncio.get_running_loop().run_in_executor(
                     None, _upload_to_r2, local_path, f"{content_hash}.mp3"
                 )
+                # R2 public URL or presigned URL (production); /audio/ local mount (dev only — no auth)
                 audio_url = r2_url or f"/audio/{content_hash}.mp3"
                 logger.info("TTS complete. audio_url=%s", audio_url)
             except Exception as exc:
                 logger.error("Background TTS synthesis failed: %s", exc)
+                tts_error = str(exc)
         elif content_hash and os.path.exists(os.path.join(AUDIO_DIR, f"{content_hash}.mp3")):
             audio_url = f"/audio/{content_hash}.mp3"
 
@@ -570,6 +704,7 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None) ->
                 "event": "done",
                 "final_story": final_story,
                 "audio_url": audio_url,
+                "tts_error": tts_error,
             })
         else:
             yield _sse({"event": "error", "message": "Graph completed but final_story is missing."})
@@ -602,7 +737,7 @@ async def ambient_random(category: str):
 
 
 @app.post("/index")
-async def index(drop_old: bool = False) -> JSONResponse:
+async def index(drop_old: bool = False, _: None = Depends(_require_admin)) -> JSONResponse:
     """Scan sources/ PDFs and (re-)index them into Milvus.
 
     Pass ?drop_old=true to wipe the collection and rebuild from scratch.
@@ -635,7 +770,7 @@ async def generate(
     """
     await _reserve_usage_or_raise(str(current_user.id))
     return StreamingResponse(
-        _stream_graph(request, str(current_user.id)),
+        _stream_graph(request, str(current_user.id), user_is_premium(current_user)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

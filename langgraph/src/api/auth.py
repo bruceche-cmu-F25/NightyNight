@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.database import get_db
-from db.models import Story, User
+from db.models import Story, User, user_is_premium
 from api.deps import JWT_ALGORITHM, JWT_SECRET, get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -23,7 +23,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ── In-memory rate limiter (per IP) ──────────────────────────────────────────
 _attempts: dict[str, list[float]] = defaultdict(list)
 _RL_WINDOW = 60   # seconds
-_RL_MAX    = 10   # attempts per window
+_RL_MAX    = 5    # attempts per window — conservative because this limiter is per-process;
+                  # in multi-worker/multi-instance deployments the effective limit is _RL_MAX × workers
 
 def _rate_limit(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
@@ -33,8 +34,8 @@ def _rate_limit(request: Request) -> None:
         raise HTTPException(status_code=429, detail="Too many attempts, please try again later")
     _attempts[ip].append(now)
 
-_ACCESS_EXPIRE_MIN  = 15
-_REFRESH_EXPIRE_DAYS = 7
+_ACCESS_EXPIRE_MIN   = 15
+_REFRESH_EXPIRE_DAYS = 7   # Tokens survive logout — full revocation needs a DB blacklist or jti column
 
 COOKIE_SECURE:   bool = os.environ.get("COOKIE_SECURE",   "false").lower() == "true"
 COOKIE_SAMESITE: str  = os.environ.get("COOKIE_SAMESITE", "lax")
@@ -51,6 +52,9 @@ def _hash(password: str) -> str:
 
 def _verify(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(plain.encode(), hashed.encode())
+
+# Pre-hashed at import so login always runs bcrypt — prevents timing-based email enumeration.
+_DUMMY_HASH: str = _hash("__nightynight_dummy__")
 
 def _make_token(sub: str, token_type: str, expire: timedelta) -> str:
     return jwt.encode(
@@ -88,6 +92,9 @@ def _user_dict(user: User) -> dict:
         },
         "daily_count": user.daily_count,
         "monthly_count": user.monthly_count,
+        "plan": user.plan,
+        "subscription_status": user.subscription_status,
+        "is_premium": user_is_premium(user),
     }
 
 
@@ -105,7 +112,7 @@ async def register(request: Request, body: RegisterBody, response: Response, db:
     email = _normalize(body.email)
     if not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail="Invalid email address")
-    if len(body.password) < 5:
+    if len(body.password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     if len(body.password) > 128:
         raise HTTPException(status_code=422, detail="Password is too long")
@@ -133,7 +140,8 @@ async def login(request: Request, body: LoginBody, response: Response, db: Async
     _rate_limit(request)
     email = _normalize(body.email)
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if not user or not user.hashed_password or not _verify(body.password, user.hashed_password):
+    stored = (user.hashed_password if user and user.hashed_password else None) or _DUMMY_HASH
+    if not _verify(body.password, stored) or not user or not user.hashed_password:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     _set_refresh_cookie(response, str(user.id))
@@ -193,10 +201,12 @@ async def google_auth(body: GoogleBody, response: Response, db: AsyncSession = D
 
 @router.post("/refresh")
 async def refresh(
+    request: Request,
     response: Response,
     refresh_token: Optional[str] = Cookie(None),
     db: AsyncSession = Depends(get_db),
 ):
+    _rate_limit(request)
     if not refresh_token:
         raise HTTPException(status_code=401, detail="No refresh token")
     try:

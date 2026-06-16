@@ -80,7 +80,7 @@ function MainApp() {
   const navigate = useNavigate()
   const [topic,        setTopic]        = useState('')
   const [duration,     setDuration]     = useState(15)
-  const [voice,        setVoice]        = useState(Object.values(VOICES)[0])
+  const [voice,        setVoice]        = useState('Blake')
   const [bgMode,       setBgMode]       = useState<BackgroundMode>('stars')
   const [settings,     setSettings]     = useState<Settings>(DEFAULT_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -90,6 +90,7 @@ function MainApp() {
   const [progress,     setProgress]     = useState(0)
   const [story,        setStory]        = useState('')
   const [audioUrl,     setAudioUrl]     = useState<string | null>(null)
+  const [ttsError,     setTtsError]     = useState<string | null>(null)
   const [errorMsg,          setErrorMsg]          = useState('')
   const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
   const [onboardingDone,    setOnboardingDone]    = useState(false)
@@ -190,6 +191,7 @@ function MainApp() {
     setStatus('Starting…')
     setStory('')
     setAudioUrl(null)
+    setTtsError(null)
     setErrorMsg('')
 
     const req: GenerateRequest = {
@@ -234,6 +236,7 @@ function MainApp() {
           setProgress(100)
           setStory(ev.final_story)
           setAudioUrl(ev.audio_url)
+          setTtsError(ev.tts_error ?? null)
           setPhase('done')
         } else if (ev.event === 'error') {
           throw new Error(ev.message)
@@ -384,16 +387,29 @@ function MainApp() {
 
               <label className="option-label">
                 Voice
-                <select
-                  value={voice}
-                  onChange={e => setVoice(e.target.value)}
-                  className="option-select"
-                  style={{ '--accent': THEME.accentColor } as React.CSSProperties}
-                >
-                  {Object.entries(VOICES).map(([label, id]) => (
-                    <option key={id} value={id}>{label}</option>
-                  ))}
-                </select>
+                {user?.is_premium ? (
+                  <select
+                    value={voice}
+                    onChange={e => setVoice(e.target.value)}
+                    className="option-select"
+                    style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+                  >
+                    {Object.entries(VOICES).map(([label, id]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    value={voice}
+                    onChange={e => setVoice(e.target.value)}
+                    className="option-select"
+                    style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+                  >
+                    <option value="Blake">Blake · Inworld</option>
+                    <option value="Craig">Craig · Inworld</option>
+                    <option value="Clive">Clive · Inworld</option>
+                  </select>
+                )}
               </label>
             </div>
 
@@ -448,11 +464,15 @@ function MainApp() {
               </button>
             </div>
 
-            {audioUrl && (
+            {audioUrl ? (
               <div className="player">
                 <audio ref={audioRef} controls src={audioUrl} />
               </div>
-            )}
+            ) : ttsError ? (
+              <p className="error-text" style={{ marginBottom: '1rem' }}>
+                Audio generation failed — please try again.
+              </p>
+            ) : null}
 
             <article className="story-text">
               {story.split('\n\n').map((para, i) => (

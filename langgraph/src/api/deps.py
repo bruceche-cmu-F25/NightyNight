@@ -9,7 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import User
 
-JWT_SECRET    = os.environ.get("JWT_SECRET", "dev-secret-CHANGE-IN-PRODUCTION")
+_jwt_secret = os.environ.get("JWT_SECRET")
+if not _jwt_secret:
+    raise RuntimeError("JWT_SECRET environment variable is required but not set")
+JWT_SECRET    = _jwt_secret
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
