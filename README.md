@@ -1,13 +1,49 @@
-Lets stop counting dollars, we'll be counting stars
+# NightyNight
 
-Motivation
+> *"We are such stuff as dreams are made on."* — Shakespeare
 
-I started building this project to solve a real problem in my own life.
+AI-generated bedtime stories, narrated and ready to listen to. Pick any topic — the origin of the universe, ancient civilizations, deep-sea biology — and NightyNight turns it into a calm audio story made for the moment your body is ready to rest, but your mind still wants one more thing.
 
-My girlfriend sometimes struggles with insomnia. Many nights, she asks me to tell her stories before she falls asleep — stories about the origin of the universe, astronomy, geography, biological evolution, ancient civilizations, or the history of Earth. I genuinely enjoy telling these stories, but quite often I get too sleepy and fall asleep before I can finish, while she still wants to keep listening.
+---
 
-That made me wonder: what if there were a product that could do this automatically?
+## Why this exists
 
-This project aims to create an AI system that can generate calming, educational bedtime stories on demand. A user can simply choose a topic, and the system will generate a well-structured narrative that is both informative and relaxing. The story is then converted into a soft, listenable audio format, creating a bedtime science podcast experience.
+My girlfriend sometimes struggles with insomnia. Most nights she asks me to tell her stories before she falls asleep — about cosmology, evolution, ancient cities, the history of Earth. I love telling them, but I usually fall asleep mid-sentence before she does.
 
-The goal is to help people like my girlfriend — those who want something interesting and soothing to listen to at night — fall asleep more easily while still learning something new.
+That's the problem NightyNight solves.
+
+---
+
+## How it works
+
+1. **Choose a topic**
+2. **Set the mood** — length, narrator voice, and who you're listening for
+3. **A story is written and narrated for you** — in real time
+4. **Listen with your eyes closed**
+
+---
+
+## Stack
+
+React · Three.js · FastAPI · LangGraph · Google Gemini · ElevenLabs · Cloudflare R2 · Neon Postgres
+
+---
+
+## Local setup
+
+```bash
+# Milvus (vector store for RAG)
+docker-compose up -d
+
+# Backend
+cd langgraph && pip install -r requirements.txt
+cp .env.example .env   # fill in API keys
+uvicorn src.api.server:app --reload --port 8000
+
+# Frontend
+cd frontend && npm install && npm run dev
+```
+
+---
+
+*Built for my fiance who wanted someone to finish the story.*

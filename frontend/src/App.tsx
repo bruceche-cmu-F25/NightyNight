@@ -16,15 +16,21 @@ import LandingPage from './pages/LandingPage'
 
 type Phase = 'idle' | 'generating' | 'done' | 'error'
 
-const VOICES: Record<string, string> = {
-  'Christopher (gentle)':  'G17SuINrv2H9FC6nvetn',
-  'Archer (deep, calm)':   'X0K9Z1Bor9SpbE1wSaoe',
-  'Adam Stone (smooth)':   'NFG5qt843uXKj4pFvR7C',
-  'John Doe (deep)':       'EiNlNiXeDU1pqqOPrYMO',
-  'Kyle Manning':          'q8hD3YAFEqLvfbspywun',
-  'True Crime Narrator':   'tZssYepgGaQmegsMEXjK',
-  'Autumn Veil (warm ♀)':  'KoVIHoyLDrQyd4pGalbs',
-}
+const FREE_VOICES = [
+  { label: 'Blake',  id: 'Blake'  },
+  { label: 'Craig',  id: 'Craig'  },
+  { label: 'Clive',  id: 'Clive'  },
+]
+
+const PREMIUM_VOICES = [
+  { label: 'Christopher — gentle',  id: 'G17SuINrv2H9FC6nvetn' },
+  { label: 'Archer — deep, calm',   id: 'X0K9Z1Bor9SpbE1wSaoe' },
+  { label: 'Adam Stone — smooth',   id: 'NFG5qt843uXKj4pFvR7C' },
+  { label: 'John Doe — deep',       id: 'EiNlNiXeDU1pqqOPrYMO' },
+  { label: 'Kyle Manning',          id: 'q8hD3YAFEqLvfbspywun' },
+  { label: 'True Crime Narrator',   id: 'tZssYepgGaQmegsMEXjK' },
+  { label: 'Autumn Veil — warm',    id: 'KoVIHoyLDrQyd4pGalbs' },
+]
 
 const DEFAULT_SETTINGS: Settings = {
   ambient:  'auto',
@@ -387,29 +393,25 @@ function MainApp() {
 
               <label className="option-label">
                 Voice
-                {user?.is_premium ? (
-                  <select
-                    value={voice}
-                    onChange={e => setVoice(e.target.value)}
-                    className="option-select"
-                    style={{ '--accent': THEME.accentColor } as React.CSSProperties}
-                  >
-                    {Object.entries(VOICES).map(([label, id]) => (
-                      <option key={id} value={id}>{label}</option>
+                <select
+                  value={voice}
+                  onChange={e => setVoice(e.target.value)}
+                  className="option-select"
+                  style={{ '--accent': THEME.accentColor } as React.CSSProperties}
+                >
+                  <optgroup label="Standard">
+                    {FREE_VOICES.map(v => (
+                      <option key={v.id} value={v.id}>{v.label}</option>
                     ))}
-                  </select>
-                ) : (
-                  <select
-                    value={voice}
-                    onChange={e => setVoice(e.target.value)}
-                    className="option-select"
-                    style={{ '--accent': THEME.accentColor } as React.CSSProperties}
-                  >
-                    <option value="Blake">Blake · Inworld</option>
-                    <option value="Craig">Craig · Inworld</option>
-                    <option value="Clive">Clive · Inworld</option>
-                  </select>
-                )}
+                  </optgroup>
+                  <optgroup label="Premium ✦">
+                    {PREMIUM_VOICES.map(v => (
+                      <option key={v.id} value={v.id} disabled={!user?.is_premium}>
+                        {v.label}{!user?.is_premium ? ' · Premium' : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                </select>
               </label>
             </div>
 
