@@ -138,7 +138,7 @@ export default function EarthScene({ children, onProgress }: Props) {
     let isDragging = false, prevX = 0, prevY = 0, scrollProg = 0
 
     const onPointerDown = (e: PointerEvent) => {
-      if (scrollProg > 0.54) return
+      if (scrollProg > 0.66) return
       isDragging = true
       mountEl.style.cursor = 'grabbing'
       prevX = e.clientX; prevY = e.clientY
@@ -162,11 +162,11 @@ export default function EarthScene({ children, onProgress }: Props) {
 
     // ── ScrollTrigger — 4-act journey ─────────────────────────────
     //
-    //  Act 1  (0.00 – 0.22)  Hero — close, Earth only at bottom of screen
-    //  Act 1→2(0.22 – 0.50)  Pull back — Earth rises and becomes whole
-    //  Act 2  (0.50 – 0.55)  Hold — full Earth floating in space
-    //  Act 2→3(0.55 – 0.78)  Re-approach — zoom back in, clouds thicken
-    //  Act 3→4(0.78 – 1.00)  Enter clouds → bed revealed
+    //  Act 1  (0.00 – 0.20)  Hero — close, Earth only at bottom of screen
+    //  Act 1→2(0.20 – 0.50)  Pull back — Earth rises and becomes whole
+    //  Act 2  (0.50 – 0.66)  Hold — full Earth floating in space (extended hold)
+    //  Act 2→3(0.66 – 0.82)  Re-approach — zoom back in, clouds thicken
+    //  Act 3→4(0.82 – 1.00)  Enter clouds → darkness (blackout delayed)
     //
     //  Camera z:  1.12 → 6.0 → 2.5 → 0.12
     //  LookAt y:  2.5 → 0.0 → 0.0 → 0.0
@@ -177,35 +177,41 @@ export default function EarthScene({ children, onProgress }: Props) {
       start:   'top top',
       end:     'bottom bottom',
       scrub:   1.5,
+      snap: {
+        snapTo:   [0, 0.30, 0.60, 0.80, 1.0],
+        duration: { min: 0.2, max: 0.5 },
+        delay:    0.4,
+        ease:     'power1.inOut',
+      },
       onUpdate(self) {
         const p = self.progress
         scrollProg = p
         onProgressRef.current?.(p)
 
-        if (p <= 0.22) {
+        if (p <= 0.20) {
           camTarget.z     = 1.12
           camTarget.lookY = 2.5
           camTarget.fov   = 90
 
         } else if (p <= 0.50) {
-          const t = (p - 0.22) / 0.28
+          const t = (p - 0.20) / 0.30
           camTarget.z     = gsap.utils.interpolate(1.12, 6.0, t)
           camTarget.lookY = gsap.utils.interpolate(2.5, 0.0, t)
           camTarget.fov   = gsap.utils.interpolate(90, 45, t)
 
-        } else if (p <= 0.55) {
+        } else if (p <= 0.66) {
           camTarget.z     = 6.0
           camTarget.lookY = 0.0
           camTarget.fov   = 45
 
-        } else if (p <= 0.78) {
-          const t = (p - 0.55) / 0.23
+        } else if (p <= 0.82) {
+          const t = (p - 0.66) / 0.16
           camTarget.z     = gsap.utils.interpolate(6.0, 2.5, t)
           camTarget.lookY = 0.0
           camTarget.fov   = 45
 
         } else {
-          const t = (p - 0.78) / 0.22
+          const t = (p - 0.82) / 0.18
           camTarget.z     = gsap.utils.interpolate(2.5, 0.12, t)
           camTarget.lookY = 0.0
           camTarget.fov   = 45
@@ -233,8 +239,8 @@ export default function EarthScene({ children, onProgress }: Props) {
 
       // Auto-rotation slows during re-approach so we land cleanly
       if (!isDragging) {
-        const spin = scrollProg > 0.55
-          ? 0.0014 * Math.max(0, 1 - (scrollProg - 0.55) / 0.23)
+        const spin = scrollProg > 0.66
+          ? 0.0014 * Math.max(0, 1 - (scrollProg - 0.66) / 0.16)
           : 0.0014
         earthGroup.rotation.y += spin
       }

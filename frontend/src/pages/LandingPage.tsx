@@ -33,7 +33,7 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
         letterSpacing: '0.2em',
         textTransform: 'uppercase',
         color: 'rgba(127,168,200,0.5)',
-        marginBottom: '1.5rem',
+        marginBottom: '1rem',
       }}>
         · Bedtime stories, made by AI ·
       </p>
@@ -47,7 +47,7 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
         color: '#f0f0ff',
         textShadow: '0 0 80px rgba(180,180,255,0.28)',
         margin: 0,
-        marginBottom: '1.25rem',
+        marginBottom: '3.5rem',
       }}>
         NightyNight
       </h1>
@@ -57,13 +57,13 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
         fontStyle: 'italic',
         fontWeight: 400,
         fontSize: 'clamp(1rem, 2.8vw, 1.3rem)',
-        color: 'rgba(220,220,240,0.55)',
+        color: 'rgba(212, 219, 233, 0.55)',
         maxWidth: '480px',
         lineHeight: 1.65,
         margin: 0,
-        marginBottom: '2.5rem',
+        marginBottom: '1.5rem',
       }}>
-        Sleep through the wonders of science
+        Fall asleep to stories about science, nature, history, and the universe.
       </p>
 
       {/* CTAs need pointer events restored */}
@@ -74,7 +74,7 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
             background: ACCENT,
             color: '#07111e',
             borderRadius: '999px',
-            padding: '0.85rem 2.6rem',
+            padding: '0.90rem 2rem',
             fontSize: '0.88rem',
             fontWeight: 500,
             letterSpacing: '0.06em',
@@ -94,7 +94,7 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
             padding: '0.85rem 2.6rem',
             fontSize: '0.88rem',
             fontWeight: 400,
-            letterSpacing: '0.06em',
+            letterSpacing: '0.08em',
             textDecoration: 'none',
             fontFamily: 'Inter, sans-serif',
           }}
@@ -115,6 +115,64 @@ function HeroOverlay({ heroRef }: { heroRef: React.RefObject<HTMLDivElement> }) 
       }}>
         Scroll to explore
       </p>
+    </div>
+  )
+}
+
+// ── Pullback caption (p≈0.26 — Earth shrinking, stars opening up) ─────────
+function PullbackOverlay({ pullbackRef }: { pullbackRef: React.RefObject<HTMLDivElement> }) {
+  return (
+    <div
+      ref={pullbackRef}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        opacity: 0,
+        pointerEvents: 'none',
+        zIndex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+        padding: '2rem 2rem 12rem',
+        gap: '0.9rem',
+      }}
+    >
+      <p style={{
+        fontFamily: "'Lora', serif",
+        fontStyle: 'italic',
+        fontWeight: 400,
+        fontSize: 'clamp(1.2rem, 2.8vw, 1.85rem)',
+        color: 'rgba(220,225,245,0.82)',
+        margin: 0,
+        letterSpacing: '0.01em',
+        maxWidth: '500px',
+        lineHeight: 1.45,
+      }}>
+        "We are such stuff as dreams are made on."
+      </p>
+      <p style={{
+        fontFamily: 'Inter, sans-serif',
+        fontWeight: 300,
+        fontSize: '0.7rem',
+        letterSpacing: '0.14em',
+        textTransform: 'uppercase',
+        color: 'rgba(180,195,225,0.32)',
+        margin: 0,
+      }}>
+        — William Shakespeare
+      </p>
+      {/* <p style={{
+        fontFamily: "'Lora', serif",
+        fontStyle: 'italic',
+        fontWeight: 400,
+        fontSize: 'clamp(0.85rem, 1.8vw, 1.05rem)',
+        color: 'rgba(180,195,225,0.42)',
+        margin: '0.4rem 0 0',
+      }}>
+        Tonight can begin anywhere.
+      </p> */}
     </div>
   )
 }
@@ -142,20 +200,28 @@ function ApproachOverlay({ midRef }: { midRef: React.RefObject<HTMLDivElement> }
       }}
     >
       {/* Centre caption */}
-      <p style={{
-        position: 'absolute',
-        bottom: '12%',
-        left: 0,
-        right: 0,
-        textAlign: 'center',
-        fontFamily: "'Lora', serif",
-        fontStyle: 'italic',
-        fontSize: 'clamp(1rem, 2.5vw, 1.4rem)',
-        color: 'rgba(200,215,240,0.70)',
-        margin: 0,
-      }}>
-        Every night, a universe of stories
-      </p>
+      <div style={{ position: 'absolute', bottom: '12%', left: 0, right: 0, textAlign: 'center' }}>
+        <p style={{
+          fontFamily: "'Lora', serif",
+          fontStyle: 'italic',
+          fontSize: 'clamp(1rem, 2.5vw, 1.4rem)',
+          color: 'rgba(200,215,240,0.70)',
+          margin: '0 0 0.45rem',
+        }}>
+          Learn about everything.
+        </p>
+        <p style={{
+          fontFamily: 'Inter, sans-serif',
+          fontWeight: 300,
+          fontSize: 'clamp(0.65rem, 1.4vw, 0.80rem)',
+          letterSpacing: '0.12em',
+          textTransform: 'uppercase',
+          color: 'rgba(170,200,230,0.35)',
+          margin: 0,
+        }}>
+          Let curiosity be your guide.
+        </p>
+      </div>
 
       {/* Left column */}
       <div style={{ position: 'absolute', left: '6%', top: '18%', bottom: '22%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
@@ -208,7 +274,7 @@ function SurfaceOverlay({ surfaceRef }: { surfaceRef: React.RefObject<HTMLDivEle
         color: 'rgba(200,200,220,0.38)',
         margin: 0,
       }}>
-        Let the night bring you to peace.
+        Let the night carry you there.
       </p>
     </div>
   )
@@ -247,7 +313,27 @@ function IntroSection() {
       background: 'linear-gradient(180deg, #020408 0%, #020408 12%, #100d09 30%, #0c0818 75%, #080614 100%)',
       color: '#e8e8f0',
       overflow: 'hidden',
+      position: 'relative',
     }}>
+
+      {/* ── Background decoration ── */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
+        <div style={{
+          position: 'absolute', top: '4%', right: '-8%',
+          width: '560px', height: '480px',
+          background: 'radial-gradient(ellipse, rgba(196,165,90,0.055) 0%, transparent 65%)',
+        }} />
+        <div style={{
+          position: 'absolute', top: '38%', left: '-10%',
+          width: '680px', height: '520px',
+          background: 'radial-gradient(ellipse, rgba(80,70,160,0.06) 0%, transparent 65%)',
+        }} />
+        <div style={{
+          position: 'absolute', bottom: '8%', right: '4%',
+          width: '480px', height: '380px',
+          background: 'radial-gradient(ellipse, rgba(35,80,155,0.05) 0%, transparent 65%)',
+        }} />
+      </div>
 
       {/* ── Hero statement ── */}
       <div style={{
@@ -291,7 +377,7 @@ function IntroSection() {
           maxWidth: '680px',
           margin: 0,
         }}>
-          Science, woven into sleep.
+          Bedtime stories for curious minds.
         </h2>
 
         <p style={{
@@ -303,9 +389,22 @@ function IntroSection() {
           lineHeight: 1.9,
           margin: 0,
         }}>
-          NightyNight turns the wonders of the universe into gentle audio stories —
-          black holes, ancient civilizations, the chemistry of life —
-          narrated softly as you drift off.
+          NightyNight turns any topic into a soft, narrated audio story — made for the moment
+          when your mind is still awake, but your body is ready to rest.
+        </p>
+
+        <p style={{
+          fontFamily: 'Inter, sans-serif',
+          fontWeight: 300,
+          fontSize: 'clamp(0.92rem, 2vw, 1.02rem)',
+          color: 'rgba(210,205,192,0.38)',
+          maxWidth: '480px',
+          lineHeight: 1.9,
+          margin: 0,
+        }}>
+          Ask about the Moon, dinosaurs, ancient cities, black holes, oceans, chemistry,
+          or anything you're curious about. We'll turn it into a calm story you can listen
+          to with your eyes closed.
         </p>
 
         <div style={{ display: 'flex', gap: '0.8rem', marginTop: '0.5rem', flexWrap: 'wrap', justifyContent: 'center' }}>
@@ -339,6 +438,20 @@ function IntroSection() {
         </div>
       </div>
 
+      {/* ── Ornamental divider ── */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '1.2rem',
+        maxWidth: '320px',
+        margin: '0 auto 5rem',
+        padding: '0 2rem',
+      }}>
+        <div style={{ flex: 1, height: '1px', background: 'linear-gradient(to right, transparent, rgba(196,165,90,0.18))' }} />
+        <span style={{ color: 'rgba(196,165,90,0.32)', fontSize: '0.45rem', letterSpacing: '0.55em' }}>✦ ✦ ✦</span>
+        <div style={{ flex: 1, height: '1px', background: 'linear-gradient(to left, transparent, rgba(196,165,90,0.18))' }} />
+      </div>
+
       {/* ── Feature cards ── */}
       <div style={{
         padding: '0 2rem 7rem',
@@ -352,6 +465,7 @@ function IntroSection() {
           <div key={f.title} style={{
             background: 'rgba(255,255,255,0.022)',
             border: '1px solid rgba(255,255,255,0.055)',
+            borderTop: '1px solid rgba(196,165,90,0.14)',
             borderRadius: '18px',
             padding: '2rem 1.75rem',
             display: 'flex',
@@ -426,6 +540,7 @@ function IntroSection() {
             </div>
           ))}
         </div>
+
       </div>
 
       {/* ── Footer ── */}
@@ -448,6 +563,7 @@ export default function LandingPage() {
   const { accessToken, loading } = useAuth()
 
   const heroRef     = useRef<HTMLDivElement>(null)
+  const pullbackRef = useRef<HTMLDivElement>(null)
   const midRef      = useRef<HTMLDivElement>(null)
   const surfaceRef  = useRef<HTMLDivElement>(null)
   const blackoutRef = useRef<HTMLDivElement>(null)
@@ -455,25 +571,31 @@ export default function LandingPage() {
   // Imperatively update overlay opacity — no React state → no re-renders per frame
   const handleProgress = useCallback((p: number) => {
     if (heroRef.current) {
-      // Act 1: hero text visible, fades as camera starts pulling back
-      const op = p < 0.12 ? 1 : Math.max(0, 1 - (p - 0.12) / 0.08)
+      // Act 1 (0.00–0.20): hero text, fades as pullback begins
+      const op = p < 0.12 ? 1 : Math.max(0, 1 - (p - 0.12) / 0.06)
       heroRef.current.style.opacity = String(op)
     }
+    if (pullbackRef.current) {
+      // Pullback snap (p≈0.30): 33% through pull-back, z≈3.05
+      const fadeIn  = Math.min(Math.max((p - 0.22) / 0.08, 0), 1)
+      const fadeOut = Math.max(1 - Math.max((p - 0.32) / 0.06, 0), 0)
+      pullbackRef.current.style.opacity = String(fadeIn * fadeOut)
+    }
     if (midRef.current) {
-      // Act 2: full Earth in space — "Every night, a universe of stories"
-      const fadeIn  = Math.min(Math.max((p - 0.42) / 0.08, 0), 1)
-      const fadeOut = Math.max(1 - Math.max((p - 0.52) / 0.06, 0), 0)
+      // Hold snap (p≈0.60): full Earth — "Every night, a universe of stories"
+      const fadeIn  = Math.min(Math.max((p - 0.50) / 0.08, 0), 1)
+      const fadeOut = Math.max(1 - Math.max((p - 0.62) / 0.06, 0), 0)
       midRef.current.style.opacity = String(fadeIn * fadeOut)
     }
     if (surfaceRef.current) {
-      // Fade in at Act 3, stay visible through blackout, fade out slowly into darkness
-      const fadeIn  = Math.min(Math.max((p - 0.70) / 0.08, 0), 1)
-      const fadeOut = Math.max(1 - Math.max((p - 0.80) / 0.10, 0), 0)
+      // Re-approach snap (p≈0.80): camera at z≈2.8, Earth fills frame
+      const fadeIn  = Math.min(Math.max((p - 0.72) / 0.08, 0), 1)
+      const fadeOut = Math.max(1 - Math.max((p - 0.80) / 0.04, 0), 0)
       surfaceRef.current.style.opacity = String(fadeIn * fadeOut)
     }
     if (blackoutRef.current) {
-      // Start early, finish well before sticky releases (p≈1.0)
-      const cover = p > 0.74 ? Math.min((p - 0.74) / 0.12, 1) : 0
+      // Starts at p=0.80 (after text peaks), completes by p=0.857 before IntroSection enters
+      const cover = p > 0.80 ? Math.min((p - 0.80) / 0.055, 1) : 0
       blackoutRef.current.style.opacity = String(cover)
     }
   }, [])
@@ -484,6 +606,7 @@ export default function LandingPage() {
     <div style={{ background: '#020408', color: '#e8e8f0' }}>
       <EarthScene onProgress={handleProgress}>
         <HeroOverlay heroRef={heroRef} />
+        <PullbackOverlay pullbackRef={pullbackRef} />
         <ApproachOverlay midRef={midRef} />
         <SurfaceOverlay surfaceRef={surfaceRef} />
         {/* Blackout: covers canvas so stars/Earth are gone before sticky releases */}
