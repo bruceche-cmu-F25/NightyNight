@@ -420,23 +420,12 @@ INWORLD_VOICES: dict[str, str] = {
 }
 
 
-def _inworld_chunk_bytes(text: str, voice_id: str, api_key: str, break_ms: int = 0, speed: float = _DEFAULT_SPEED) -> bytes:
-    """Synthesize one chunk (≤1800 chars) via Inworld, return raw MP3 bytes.
-
-    break_ms > 0 appends an SSML <break> tag so Inworld generates the silence
-    itself — no raw-byte silence padding needed.
-    """
+def _inworld_chunk_bytes(text: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> bytes:
+    """Synthesize one chunk (≤1800 chars) via Inworld, return raw MP3 bytes."""
     if not api_key:
         raise RuntimeError("INWORLD_API_KEY is missing")
     if len(text) > _INWORLD_MAX_CHARS:
         raise ValueError(f"Inworld chunk too long: {len(text)} chars")
-
-    if break_ms > 0:
-        body_key   = "ssml"
-        body_value = f'<speak>{text}<break time="{break_ms}ms"/></speak>'
-    else:
-        body_key   = "text"
-        body_value = text
 
     resp = requests.post(
         _INWORLD_TTS_URL,
@@ -445,7 +434,7 @@ def _inworld_chunk_bytes(text: str, voice_id: str, api_key: str, break_ms: int =
             "Content-Type": "application/json",
         },
         json={
-            body_key:      body_value,
+            "text":        text,
             "voiceId":     voice_id,
             "audioConfig": {"audioEncoding": "MP3", "speakingRate": speed},
             "modelId":     "inworld-tts-1.5-max",
@@ -497,17 +486,8 @@ def _synthesize_inworld_blocking(
 
     logger.info("Inworld TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunks), speed)
     all_bytes: list[bytes] = []
-    last_idx = len(chunks) - 1
-    for i, (chunk_text, is_boundary) in enumerate(chunks):
-        # Append silence via SSML break — chapter boundary gets 2.5s (matches
-        # ElevenLabs), regular paragraph gets 1.5s, last chunk gets none.
-        if i == last_idx:
-            break_ms = 0
-        elif is_boundary:
-            break_ms = 2500
-        else:
-            break_ms = 1500
-        audio = _inworld_chunk_bytes(chunk_text, voice_id, _INWORLD_API_KEY, break_ms, speed)
+    for i, (chunk_text, _) in enumerate(chunks):
+        audio = _inworld_chunk_bytes(chunk_text, voice_id, _INWORLD_API_KEY, speed)
         all_bytes.append(audio)
         logger.info("Inworld TTS: chunk %d/%d done (%d KB)", i + 1, len(chunks), len(audio) // 1024)
 
