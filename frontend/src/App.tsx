@@ -2,11 +2,12 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import gsap from 'gsap'
 import { Routes, Route, useNavigate } from 'react-router-dom'
 import StarField, { BackgroundMode } from './StarField'
-import SettingsDrawer, { Settings } from './SettingsDrawer'
+import SettingsDrawer from './SettingsDrawer'
 import AmbientPlayer from './AmbientPlayer'
 import { THEMES } from './theme'
 import { streamGenerate, NODE_PROGRESS, GenerateRequest } from './api'
 import { useAuth } from './context/AuthContext'
+import { useStorySettings } from './hooks/useStorySettings'
 import ProtectedRoute from './components/ProtectedRoute'
 import OnboardingModal from './components/OnboardingModal'
 import LoginPage from './pages/LoginPage'
@@ -16,27 +17,13 @@ import LandingPage from './pages/LandingPage'
 
 type Phase = 'idle' | 'generating' | 'done' | 'error'
 
-const FREE_VOICES = [
-  { label: 'Blake',  id: 'Blake'  },
-  { label: 'Craig',  id: 'Craig'  },
-  { label: 'Clive',  id: 'Clive'  },
-]
+type VoiceEntry = { label: string; id: string }
 
-const PREMIUM_VOICES = [
-  { label: 'Christopher — gentle',  id: 'G17SuINrv2H9FC6nvetn' },
-  { label: 'Archer — deep, calm',   id: 'X0K9Z1Bor9SpbE1wSaoe' },
-  { label: 'Adam Stone — smooth',   id: 'NFG5qt843uXKj4pFvR7C' },
-  { label: 'John Doe — deep',       id: 'EiNlNiXeDU1pqqOPrYMO' },
-  { label: 'Kyle Manning',          id: 'q8hD3YAFEqLvfbspywun' },
-  { label: 'True Crime Narrator',   id: 'tZssYepgGaQmegsMEXjK' },
-  { label: 'Autumn Veil — warm',    id: 'KoVIHoyLDrQyd4pGalbs' },
+const FALLBACK_FREE_VOICES: VoiceEntry[] = [
+  { label: 'Blake', id: 'Blake' },
+  { label: 'Craig', id: 'Craig' },
+  { label: 'Clive', id: 'Clive' },
 ]
-
-const DEFAULT_SETTINGS: Settings = {
-  ambient:  'auto',
-  audience: 'curious adults',
-  style:    'gentle bedtime',
-}
 
 const TOPIC_AMBIENT: [string[], string][] = [
   [['space', 'cosmos', 'star', 'planet', 'galaxy', 'universe', 'astro', 'nebula', 'moon', 'solar', 'orbit', 'nasa', 'rocket', 'comet', 'milky'], 'cosmos'],
@@ -83,12 +70,11 @@ export default function App() {
 
 function MainApp() {
   const { accessToken, user, logout } = useAuth()
+  const { voice, setVoice, settings, setSettings } = useStorySettings()
   const navigate = useNavigate()
   const [topic,        setTopic]        = useState('')
   const [duration,     setDuration]     = useState(15)
-  const [voice,        setVoice]        = useState('Blake')
   const [bgMode,       setBgMode]       = useState<BackgroundMode>('stars')
-  const [settings,     setSettings]     = useState<Settings>(DEFAULT_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [bgPickerOpen, setBgPickerOpen] = useState(false)
   const [phase,        setPhase]        = useState<Phase>('idle')
@@ -100,6 +86,8 @@ function MainApp() {
   const [errorMsg,          setErrorMsg]          = useState('')
   const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
   const [onboardingDone,    setOnboardingDone]    = useState(false)
+  const [freeVoices,    setFreeVoices]    = useState<VoiceEntry[]>(FALLBACK_FREE_VOICES)
+  const [premiumVoices, setPremiumVoices] = useState<VoiceEntry[]>([])
 
   const abortRef          = useRef<AbortController | null>(null)
   const bgPickerRef       = useRef<HTMLDivElement>(null)
@@ -123,13 +111,16 @@ function MainApp() {
   // Show onboarding if first login (no preferences set yet)
   const showOnboarding = !onboardingDone && !!user && !user.preferences.audience && !user.preferences.style
 
-  // Sync settings whenever saved preferences change (login or onboarding save)
+  // Fetch voice catalog from backend on mount
   useEffect(() => {
-    if (!user?.preferences) return
-    if (user.preferences.voice)    setVoice(user.preferences.voice)
-    if (user.preferences.audience) setSettings(s => ({ ...s, audience: user.preferences.audience! }))
-    if (user.preferences.style)    setSettings(s => ({ ...s, style: user.preferences.style! }))
-  }, [user?.preferences?.voice, user?.preferences?.audience, user?.preferences?.style])
+    fetch('/voices')
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data.free))    setFreeVoices(data.free)
+        if (Array.isArray(data.premium)) setPremiumVoices(data.premium)
+      })
+      .catch(() => { /* keep fallback voices */ })
+  }, [])
 
   // Auto-switch background when audience changes
   useEffect(() => {
@@ -400,12 +391,12 @@ function MainApp() {
                   style={{ '--accent': THEME.accentColor } as React.CSSProperties}
                 >
                   <optgroup label="Standard">
-                    {FREE_VOICES.map(v => (
+                    {freeVoices.map(v => (
                       <option key={v.id} value={v.id}>{v.label}</option>
                     ))}
                   </optgroup>
                   <optgroup label="Premium ✦">
-                    {PREMIUM_VOICES.map(v => (
+                    {premiumVoices.map(v => (
                       <option key={v.id} value={v.id} disabled={!user?.is_premium}>
                         {v.label}{!user?.is_premium ? ' · Premium' : ''}
                       </option>

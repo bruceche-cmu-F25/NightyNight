@@ -501,14 +501,32 @@ def _synthesize_inworld_blocking(
 
 # ── Auth / usage helpers ──────────────────────────────────────────────────────
 
-async def _reserve_usage_or_raise(user_id: str) -> None:
-    """Atomically check and increment the daily/monthly counters.
+async def _check_limit_or_raise(user_id: str) -> None:
+    """Read-only pre-flight check — gives a clean 429 before streaming starts.
 
-    Uses SELECT ... FOR UPDATE to prevent concurrent requests from double-spending
-    the limit. Resets counters if the daily/monthly window has rolled over.
-    Raises HTTP 429 if the daily limit is already reached.
-    Must complete before StreamingResponse starts so the client gets a proper 429,
-    not an SSE error event mid-stream.
+    Does not increment counters; the atomic increment happens later inside
+    _reserve_and_save_story once the story text is ready.
+    """
+    async with AsyncSessionLocal() as db:
+        user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+        today = date.today()
+        daily = user.daily_count if user.daily_reset_at >= today else 0
+        if daily >= DAILY_LIMIT:
+            raise HTTPException(status_code=429, detail="Daily limit reached")
+
+
+async def _reserve_and_save_story(
+    user_id: str, topic: str, story_text: str, duration_min: int,
+) -> str:
+    """Atomically increment quota counters and persist the generated story text.
+
+    Combining these two writes in one transaction ensures a quota slot is never
+    consumed without a corresponding story record — if either write fails, both
+    roll back together.
+
+    Returns the new story's UUID so audio_url can be patched in later via
+    _update_story_audio once synthesis completes.
+    Raises HTTP 429 if the limit was reached by a concurrent request.
     """
     async with AsyncSessionLocal() as db:
         async with db.begin():
@@ -525,20 +543,30 @@ async def _reserve_usage_or_raise(user_id: str) -> None:
 
             if locked.daily_count >= DAILY_LIMIT:
                 raise HTTPException(status_code=429, detail="Daily limit reached")
-            locked.daily_count += 1
+            locked.daily_count  += 1
             locked.monthly_count += 1
 
+            story = Story(
+                user_id=user_id,
+                topic=topic,
+                story_text=story_text,
+                audio_url=None,
+                duration_min=duration_min,
+            )
+            db.add(story)
+            await db.flush()   # assigns story.id within the transaction
+            return str(story.id)
 
-async def _save_story(user_id: str, topic: str, story_text: str, audio_url: str | None, duration_min: int) -> None:
+
+async def _update_story_audio(story_id: str, audio_url: str) -> None:
+    """Patch audio_url onto an existing story row after synthesis completes."""
     async with AsyncSessionLocal() as db:
-        db.add(Story(
-            user_id=user_id,
-            topic=topic,
-            story_text=story_text,
-            audio_url=audio_url,
-            duration_min=duration_min,
-        ))
-        await db.commit()
+        async with db.begin():
+            story = (await db.execute(
+                select(Story).where(Story.id == story_id)
+            )).scalar_one_or_none()
+            if story:
+                story.audio_url = audio_url
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -553,6 +581,18 @@ class GenerateRequest(BaseModel):
 
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
+
+def _initial_story_state(request: "GenerateRequest") -> StoryState:
+    """Translate a GenerateRequest into the required StoryState fields for the graph."""
+    return {
+        "topic":        request.topic,
+        "duration_min": request.duration_min,
+        "style":        request.style,
+        "audience":     request.audience,
+        "domain":       request.domain,
+        "tts_speed":    _AUDIENCE_SPEED.get(request.audience, _DEFAULT_SPEED),
+    }
+
 
 def _sse(payload: dict) -> str:
     """Format a dict as an SSE data line."""
@@ -569,6 +609,44 @@ _PROGRESS_NODES = {
 }
 
 
+def _audio_content_hash(text: str, is_premium: bool) -> str:
+    """Stable cache key for a (tier, text) pair — first 16 hex chars of SHA-256."""
+    tier = "premium" if is_premium else "free"
+    return hashlib.sha256(f"{tier}:{text}".encode()).hexdigest()[:16]
+
+
+def _audio_local_path(content_hash: str) -> str:
+    return os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
+
+
+def _finalize_audio(content_hash: str) -> str:
+    """Upload local MP3 to R2 and return the public URL (blocking).
+
+    Falls back to the local /audio/ mount when R2 is not configured (dev).
+    """
+    local_path = _audio_local_path(content_hash)
+    r2_url = _upload_to_r2(local_path, f"{content_hash}.mp3")
+    url = r2_url or f"/audio/{content_hash}.mp3"
+    logger.info("TTS complete. audio_url=%s", url)
+    return url
+
+
+def _run_tts(
+    text: str,
+    voice: str,
+    out_path: str,
+    audience: str,
+    num_chapters: int,
+    is_premium: bool,
+) -> tuple[int, int]:
+    """Blocking TTS dispatch: ElevenLabs for premium users, Inworld for free."""
+    if is_premium:
+        logger.info("[tts] provider=elevenlabs voice=%s", voice)
+        return _synthesize_blocking(text, voice, out_path, audience, num_chapters)
+    logger.info("[tts] provider=inworld voice=%s", voice)
+    return _synthesize_inworld_blocking(text, voice, out_path, audience, num_chapters)
+
+
 async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is_premium: bool = False) -> AsyncIterator[str]:
     """Run the LangGraph graph and yield SSE events at each node completion.
 
@@ -582,20 +660,14 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
     second client request.
     """
 
-    initial_state: StoryState = {
-        "topic": request.topic,
-        "duration_min": request.duration_min,
-        "style": request.style,
-        "audience": request.audience,
-        "domain": request.domain,
-        "tts_speed": _AUDIENCE_SPEED.get(request.audience, _DEFAULT_SPEED),
-    }
+    initial_state = _initial_story_state(request)
 
     # Seed current_state with the inputs; nodes will fill in the rest.
     current_state: dict = dict(initial_state)
 
     synthesis_future = None
     content_hash: str | None = None
+    story_id: str | None = None
 
     try:
         async for chunk in graph.astream(initial_state, stream_mode="updates"):
@@ -609,30 +681,25 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
                 if node_name == "polish_story" and synthesis_future is None:
                     polished = current_state.get("final_story")
                     if polished:
-                        _tier = "premium" if is_premium else "free"
-                        content_hash = hashlib.sha256(f"{_tier}:{polished}".encode()).hexdigest()[:16]
-                        audio_out = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
+                        content_hash = _audio_content_hash(polished, is_premium)
+                        audio_out = _audio_local_path(content_hash)
                         if not os.path.exists(audio_out):
                             loop = asyncio.get_running_loop()
-                            if is_premium:
-                                tts_provider = "elevenlabs"
-                                tts_voice    = request.voice
-                                synthesis_future = loop.run_in_executor(
-                                    None, _synthesize_blocking,
-                                    polished, tts_voice, audio_out, request.audience,
-                                    current_state.get("num_chapters", 1),
-                                )
-                            else:
-                                tts_provider = "inworld"
-                                tts_voice    = request.voice
-                                synthesis_future = loop.run_in_executor(
-                                    None, _synthesize_inworld_blocking,
-                                    polished, tts_voice, audio_out, request.audience,
-                                    current_state.get("num_chapters", 1),
-                                )
-                            logger.info("[tts] provider=%s premium=%s voice=%s", tts_provider, is_premium, tts_voice)
+                            synthesis_future = loop.run_in_executor(
+                                None, _run_tts,
+                                polished, request.voice, audio_out, request.audience,
+                                current_state.get("num_chapters", 1), is_premium,
+                            )
                         else:
                             logger.info("TTS cache hit — skipping synthesis.")
+                        if user_id:
+                            try:
+                                story_id = await _reserve_and_save_story(
+                                    user_id, request.topic, polished, request.duration_min
+                                )
+                            except Exception as exc:
+                                logger.warning("Failed to reserve story slot: %s", exc)
+                                raise
 
                 if node_name not in _PROGRESS_NODES:
                     continue
@@ -661,25 +728,21 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
                     yield ": tts-pending\n\n"
                     await asyncio.sleep(5)
                 await synthesis_future
-                local_path = os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
-                r2_url = await asyncio.get_running_loop().run_in_executor(
-                    None, _upload_to_r2, local_path, f"{content_hash}.mp3"
+                audio_url = await asyncio.get_running_loop().run_in_executor(
+                    None, _finalize_audio, content_hash
                 )
-                # R2 public URL or presigned URL (production); /audio/ local mount (dev only — no auth)
-                audio_url = r2_url or f"/audio/{content_hash}.mp3"
-                logger.info("TTS complete. audio_url=%s", audio_url)
             except Exception as exc:
                 logger.error("Background TTS synthesis failed: %s", exc)
                 tts_error = str(exc)
-        elif content_hash and os.path.exists(os.path.join(AUDIO_DIR, f"{content_hash}.mp3")):
+        elif content_hash and os.path.exists(_audio_local_path(content_hash)):
             audio_url = f"/audio/{content_hash}.mp3"
 
         if final_story:
-            if user_id:
+            if story_id and audio_url:
                 try:
-                    await _save_story(user_id, request.topic, final_story, audio_url, request.duration_min)
+                    await _update_story_audio(story_id, audio_url)
                 except Exception as exc:
-                    logger.warning("Failed to save story: %s", exc)
+                    logger.warning("Failed to update story audio_url: %s", exc)
             yield _sse({
                 "event": "done",
                 "final_story": final_story,
@@ -701,6 +764,21 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/voices")
+async def voices() -> dict:
+    """Return the voice catalog grouped by tier. No auth required."""
+    return {
+        "free": [
+            {"label": label, "id": voice_id}
+            for label, voice_id in INWORLD_VOICES.items()
+        ],
+        "premium": [
+            {"label": label, "id": voice_id}
+            for label, voice_id in ELEVENLABS_VOICES.items()
+        ],
+    }
 
 
 @app.get("/ambient/{category}")
@@ -748,7 +826,7 @@ async def generate(
     - `done`       — pipeline complete; includes `final_story` and `audio_url`
     - `error`      — something went wrong; includes `message`
     """
-    await _reserve_usage_or_raise(str(current_user.id))
+    await _check_limit_or_raise(str(current_user.id))
     return StreamingResponse(
         _stream_graph(request, str(current_user.id), user_is_premium(current_user)),
         media_type="text/event-stream",

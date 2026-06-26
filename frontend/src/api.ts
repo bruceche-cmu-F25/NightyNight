@@ -19,7 +19,6 @@ export interface DoneEvent {
   final_story: string
   audio_url: string | null
   tts_error: string | null
-  status_message: string
 }
 
 export interface ErrorEvent {
