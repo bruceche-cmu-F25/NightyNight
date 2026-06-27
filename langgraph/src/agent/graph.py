@@ -3,16 +3,12 @@ import logging
 import operator
 import os
 import re
-import time
-from pathlib import Path
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Optional
 
 from dotenv import load_dotenv
-from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_milvus import Milvus
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
@@ -26,15 +22,6 @@ from agent.prompts import (
 load_dotenv()
 
 logger = logging.getLogger(__name__)
-
-# ── RAG / Milvus Config ───────────────────────────────────────────────────────
-
-_MILVUS_URI = os.getenv("MILVUS_URI", "http://34.67.37.109:19530")
-_MILVUS_TOKEN = os.getenv("MILVUS_TOKEN", "")
-_MILVUS_COLLECTION = os.getenv("MILVUS_COLLECTION", "science_knowledge")
-_MILVUS_INDEX = os.getenv("INDEX_TYPE", "HNSW").upper()
-_RAG_TOP_K = int(os.getenv("RAG_TOP_K", "4"))
-_EMB_MODEL = os.getenv("GEMINI_EMB_MODEL", "gemini-embedding-001")
 
 # ── SECTION 1: State ─────────────────────────────────────────────────────────
 
@@ -193,146 +180,6 @@ generation_llm = ChatGoogleGenerativeAI(
 )
 
 parser = StrOutputParser()
-
-
-# ── SECTION 3b: RAG Helpers (used by ingest_sources utility) ─────────────────
-
-_embeddings: Optional[GoogleGenerativeAIEmbeddings] = None
-_vector_store: Optional[Milvus] = None
-
-
-def _get_vector_store() -> Optional[Milvus]:
-    """Return a cached Milvus connection, or None if Milvus is unavailable."""
-    global _embeddings, _vector_store
-    if _vector_store is not None:
-        return _vector_store
-    try:
-        if _embeddings is None:
-            _embeddings = GoogleGenerativeAIEmbeddings(model=_EMB_MODEL)
-        conn_args: Dict[str, Any] = {"uri": _MILVUS_URI}
-        if _MILVUS_TOKEN:
-            conn_args["token"] = _MILVUS_TOKEN
-        _vector_store = Milvus(
-            embedding_function=_embeddings,
-            collection_name=_MILVUS_COLLECTION,
-            connection_args=conn_args,
-            index_params={"index_type": _MILVUS_INDEX, "metric_type": "COSINE",
-                          "params": {"M": 16, "efConstruction": 200}},
-            search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-            auto_id=True,
-            drop_old=False,
-        )
-        return _vector_store
-    except Exception as exc:
-        logger.warning("Milvus unavailable: %s", exc)
-        return None
-
-
-# Chunking params (override via env)
-_CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
-_CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "120"))
-
-
-def ingest_sources(sources_dir: str, drop_old: bool = False) -> Dict[str, Any]:
-    """Chunk and index all PDFs under sources_dir/{domain}/ into Milvus.
-
-    Expected layout:
-        sources_dir/
-            cosmos/         ← folder name becomes the domain tag
-                book.pdf
-            life/
-                bio.pdf
-            civilization/
-                history.pdf
-
-    Each chunk is stored with metadata: {domain, source, chunk_id}.
-    Call with drop_old=True to wipe and rebuild the collection from scratch.
-    """
-    from io import BytesIO
-
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from pypdf import PdfReader
-
-    global _embeddings  # noqa: PLW0603
-    if _embeddings is None:
-        _embeddings = GoogleGenerativeAIEmbeddings(model=_EMB_MODEL)
-
-    conn_args: Dict[str, Any] = {"uri": _MILVUS_URI}
-    if _MILVUS_TOKEN:
-        conn_args["token"] = _MILVUS_TOKEN
-
-    vs = Milvus(
-        embedding_function=_embeddings,
-        collection_name=_MILVUS_COLLECTION,
-        connection_args=conn_args,
-        index_params={"index_type": _MILVUS_INDEX, "metric_type": "COSINE",
-                      "params": {"M": 16, "efConstruction": 200}},
-        search_params={"metric_type": "COSINE", "params": {"ef": 64}},
-        auto_id=True,
-        drop_old=drop_old,
-    )
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=_CHUNK_SIZE,
-        chunk_overlap=_CHUNK_OVERLAP,
-        separators=["\n\n", "\n", " ", ""],
-    )
-
-    all_docs: List[Document] = []
-    domain_stats: Dict[str, int] = {}
-    skipped: List[str] = []
-
-    for domain_entry in sorted(os.scandir(sources_dir), key=lambda e: e.name):
-        if not domain_entry.is_dir():
-            continue
-        domain = domain_entry.name
-        pdf_count = 0
-
-        for file_entry in sorted(os.scandir(domain_entry.path), key=lambda e: e.name):
-            if not file_entry.is_file() or not file_entry.name.lower().endswith(".pdf"):
-                continue
-            try:
-                raw_bytes = Path(file_entry.path).read_bytes()
-                reader = PdfReader(BytesIO(raw_bytes))
-                full_text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-                if not full_text:
-                    raise ValueError("no extractable text")
-            except Exception as exc:
-                logger.warning("Skipping %s: %s", file_entry.path, exc)
-                skipped.append(file_entry.name)
-                continue
-
-            for i, chunk in enumerate(splitter.split_text(full_text)):
-                all_docs.append(Document(
-                    page_content=chunk,
-                    metadata={"domain": domain, "source": file_entry.name, "chunk_id": i},
-                ))
-            pdf_count += 1
-
-        domain_stats[domain] = pdf_count
-
-    _INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "200"))
-    _INGEST_BATCH_PAUSE = float(os.getenv("INGEST_BATCH_PAUSE_SEC", "5"))
-
-    for batch_start in range(0, len(all_docs), _INGEST_BATCH_SIZE):
-        batch = all_docs[batch_start: batch_start + _INGEST_BATCH_SIZE]
-        vs.add_documents(batch)
-        logger.info(
-            "Ingested chunks %d–%d / %d",
-            batch_start + 1, batch_start + len(batch), len(all_docs),
-        )
-        if batch_start + _INGEST_BATCH_SIZE < len(all_docs):
-            time.sleep(_INGEST_BATCH_PAUSE)
-
-    logger.info("Ingested %d chunks across domains: %s", len(all_docs), domain_stats)
-
-    return {
-        "total_chunks": len(all_docs),
-        "chunk_size": _CHUNK_SIZE,
-        "chunk_overlap": _CHUNK_OVERLAP,
-        "domains": domain_stats,
-        "skipped": skipped,
-    }
 
 
 # ── SECTION 4: Node Functions ────────────────────────────────────────────────

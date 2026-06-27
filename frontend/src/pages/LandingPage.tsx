@@ -2,6 +2,7 @@ import { useCallback, useRef } from 'react'
 import { Link, Navigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import EarthScene from '../EarthScene'
+import { SCROLL_ACTS } from '../scrollActs'
 
 const ACCENT = '#7fa8c8'
 
@@ -570,33 +571,28 @@ export default function LandingPage() {
 
   // Imperatively update overlay opacity — no React state → no re-renders per frame
   const handleProgress = useCallback((p: number) => {
+    const fadeIn  = (start: number, end: number) => Math.min(Math.max((p - start) / (end - start), 0), 1)
+    const fadeOut = (start: number, end: number) => Math.max(1 - Math.max((p - start) / (end - start), 0), 0)
+
     if (heroRef.current) {
-      // Act 1 (0.00–0.20): hero text, fades as pullback begins
-      const op = p < 0.12 ? 1 : Math.max(0, 1 - (p - 0.12) / 0.06)
-      heroRef.current.style.opacity = String(op)
+      const o = SCROLL_ACTS.overlays.hero
+      heroRef.current.style.opacity = String(p < o.fadeOutStart ? 1 : fadeOut(o.fadeOutStart, o.fadeOutEnd))
     }
     if (pullbackRef.current) {
-      // Pullback snap (p≈0.30): 33% through pull-back, z≈3.05
-      const fadeIn  = Math.min(Math.max((p - 0.22) / 0.08, 0), 1)
-      const fadeOut = Math.max(1 - Math.max((p - 0.32) / 0.06, 0), 0)
-      pullbackRef.current.style.opacity = String(fadeIn * fadeOut)
+      const o = SCROLL_ACTS.overlays.pullback
+      pullbackRef.current.style.opacity = String(fadeIn(o.fadeInStart, o.fadeInEnd) * fadeOut(o.fadeOutStart, o.fadeOutEnd))
     }
     if (midRef.current) {
-      // Hold snap (p≈0.60): full Earth — "Every night, a universe of stories"
-      const fadeIn  = Math.min(Math.max((p - 0.50) / 0.08, 0), 1)
-      const fadeOut = Math.max(1 - Math.max((p - 0.62) / 0.06, 0), 0)
-      midRef.current.style.opacity = String(fadeIn * fadeOut)
+      const o = SCROLL_ACTS.overlays.hold
+      midRef.current.style.opacity = String(fadeIn(o.fadeInStart, o.fadeInEnd) * fadeOut(o.fadeOutStart, o.fadeOutEnd))
     }
     if (surfaceRef.current) {
-      // Re-approach snap (p≈0.80): camera at z≈2.8, Earth fills frame
-      const fadeIn  = Math.min(Math.max((p - 0.72) / 0.08, 0), 1)
-      const fadeOut = Math.max(1 - Math.max((p - 0.80) / 0.04, 0), 0)
-      surfaceRef.current.style.opacity = String(fadeIn * fadeOut)
+      const o = SCROLL_ACTS.overlays.surface
+      surfaceRef.current.style.opacity = String(fadeIn(o.fadeInStart, o.fadeInEnd) * fadeOut(o.fadeOutStart, o.fadeOutEnd))
     }
     if (blackoutRef.current) {
-      // Starts at p=0.80 (after text peaks), completes by p=0.857 before IntroSection enters
-      const cover = p > 0.80 ? Math.min((p - 0.80) / 0.055, 1) : 0
-      blackoutRef.current.style.opacity = String(cover)
+      const o = SCROLL_ACTS.overlays.blackout
+      blackoutRef.current.style.opacity = String(p > o.start ? Math.min((p - o.start) / (o.end - o.start), 1) : 0)
     }
   }, [])
 

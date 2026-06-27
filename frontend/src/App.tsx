@@ -1,21 +1,19 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import gsap from 'gsap'
 import { Routes, Route, useNavigate } from 'react-router-dom'
 import StarField, { BackgroundMode } from './StarField'
 import SettingsDrawer from './SettingsDrawer'
 import AmbientPlayer from './AmbientPlayer'
 import { THEMES } from './theme'
-import { streamGenerate, NODE_PROGRESS, GenerateRequest } from './api'
 import { useAuth } from './context/AuthContext'
 import { useStorySettings } from './hooks/useStorySettings'
+import { useStoryGeneration } from './hooks/useStoryGeneration'
 import ProtectedRoute from './components/ProtectedRoute'
 import OnboardingModal from './components/OnboardingModal'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import LibraryPage from './pages/LibraryPage'
 import LandingPage from './pages/LandingPage'
-
-type Phase = 'idle' | 'generating' | 'done' | 'error'
 
 type VoiceEntry = { label: string; id: string }
 
@@ -74,28 +72,26 @@ function MainApp() {
   const navigate = useNavigate()
   const [topic,        setTopic]        = useState('')
   const [duration,     setDuration]     = useState(15)
-  const [bgMode,       setBgMode]       = useState<BackgroundMode>('stars')
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const [bgPickerOpen, setBgPickerOpen] = useState(false)
-  const [phase,        setPhase]        = useState<Phase>('idle')
-  const [status,       setStatus]       = useState('')
-  const [progress,     setProgress]     = useState(0)
-  const [story,        setStory]        = useState('')
-  const [audioUrl,     setAudioUrl]     = useState<string | null>(null)
-  const [ttsError,     setTtsError]     = useState<string | null>(null)
-  const [errorMsg,          setErrorMsg]          = useState('')
-  const [autoPlayAmbient,   setAutoPlayAmbient]   = useState<string | null>(null)
-  const [onboardingDone,    setOnboardingDone]    = useState(false)
-  const [freeVoices,    setFreeVoices]    = useState<VoiceEntry[]>(FALLBACK_FREE_VOICES)
-  const [premiumVoices, setPremiumVoices] = useState<VoiceEntry[]>([])
+  const [bgMode,          setBgMode]          = useState<BackgroundMode>('stars')
+  const [settingsOpen,    setSettingsOpen]    = useState(false)
+  const [bgPickerOpen,    setBgPickerOpen]    = useState(false)
+  const [autoPlayAmbient, setAutoPlayAmbient] = useState<string | null>(null)
+  const [onboardingDone,  setOnboardingDone]  = useState(false)
+  const [freeVoices,      setFreeVoices]      = useState<VoiceEntry[]>(FALLBACK_FREE_VOICES)
+  const [premiumVoices,   setPremiumVoices]   = useState<VoiceEntry[]>([])
+  const [ambientCategories, setAmbientCategories] = useState<string[]>([])
+  const [audiences,         setAudiences]         = useState<string[]>([
+    'curious adults', 'science enthusiasts',
+    'children (ages 4–6)', 'children (ages 7–12)', 'children (ages 13+)',
+  ])
 
-  const abortRef          = useRef<AbortController | null>(null)
+  const gen = useStoryGeneration({ topic, duration, voice, settings, accessToken })
+  const { phase, status, progress, story, audioUrl, ttsError, errorMsg } = gen
+
   const bgPickerRef       = useRef<HTMLDivElement>(null)
   const generatingCardRef = useRef<HTMLDivElement>(null)
   const storyViewRef      = useRef<HTMLDivElement>(null)
   const audioRef          = useRef<HTMLAudioElement>(null)
-  const progressTweenRef  = useRef<gsap.core.Tween | null>(null)
-  const progressProxy     = useRef({ value: 0 })
 
   // Close bg picker on outside click
   useEffect(() => {
@@ -111,7 +107,7 @@ function MainApp() {
   // Show onboarding if first login (no preferences set yet)
   const showOnboarding = !onboardingDone && !!user && !user.preferences.audience && !user.preferences.style
 
-  // Fetch voice catalog from backend on mount
+  // Fetch voice catalog and audience list from backend on mount
   useEffect(() => {
     fetch('/voices')
       .then(r => r.json())
@@ -120,6 +116,13 @@ function MainApp() {
         if (Array.isArray(data.premium)) setPremiumVoices(data.premium)
       })
       .catch(() => { /* keep fallback voices */ })
+    fetch('/config')
+      .then(r => r.json())
+      .then(data => {
+        if (Array.isArray(data.audiences))          setAudiences(data.audiences)
+        if (Array.isArray(data.ambient_categories)) setAmbientCategories(data.ambient_categories)
+      })
+      .catch(() => { /* keep fallbacks */ })
   }, [])
 
   // Auto-switch background when audience changes
@@ -176,84 +179,13 @@ function MainApp() {
     audioRef.current.play().catch(() => {})
   }, [audioUrl])
 
-  const handleGenerate = useCallback(async () => {
-    if (!topic.trim()) return
-
-    const ctrl = new AbortController()
-    abortRef.current = ctrl
-
-    setPhase('generating')
+  const handleGenerate = () => {
     setAutoPlayAmbient(topicToAmbient(topic))
-    setProgress(0)
-    setStatus('Starting…')
-    setStory('')
-    setAudioUrl(null)
-    setTtsError(null)
-    setErrorMsg('')
-
-    const req: GenerateRequest = {
-      topic:        topic.trim(),
-      duration_min: duration,
-      style:        settings.style,
-      audience:     settings.audience,
-      domain:       'general science',
-      voice,
-    }
-
-    const startCreep = (from: number, to: number, duration: number) => {
-      progressTweenRef.current?.kill()
-      progressProxy.current.value = from
-      progressTweenRef.current = gsap.to(progressProxy.current, {
-        value: to, duration, ease: 'none',
-        onUpdate: () => {
-          const v = Math.round(progressProxy.current.value)
-          setProgress(p => v > p ? v : p)
-        },
-      })
-    }
-
-    try {
-      for await (const ev of streamGenerate(req, ctrl.signal, accessToken ?? undefined)) {
-        if (ev.event === 'node_done') {
-          const pct = NODE_PROGRESS[ev.node] ?? 0
-          progressTweenRef.current?.kill()
-          setProgress(p => Math.max(p, pct))
-
-          if (ev.node === 'assemble_chapters') {
-            setStatus('Polishing story…')
-            startCreep(pct, 91, 90)          // creep 80→91 over 90 s
-          } else if (ev.node === 'polish_story') {
-            setStatus('Synthesizing audio…')
-            startCreep(pct, 99, 60)          // creep 92→99 over 60 s
-          } else {
-            setStatus(ev.message || ev.node)
-          }
-        } else if (ev.event === 'done') {
-          progressTweenRef.current?.kill()
-          setProgress(100)
-          setStory(ev.final_story)
-          setAudioUrl(ev.audio_url)
-          setTtsError(ev.tts_error ?? null)
-          setPhase('done')
-        } else if (ev.event === 'error') {
-          throw new Error(ev.message)
-        }
-      }
-    } catch (e: unknown) {
-      if ((e as { name?: string }).name === 'AbortError') return
-      setErrorMsg(e instanceof Error ? e.message : String(e))
-      setPhase('error')
-    }
-  }, [topic, duration, voice, settings, accessToken])
+    gen.start()
+  }
 
   const handleReset = () => {
-    abortRef.current?.abort()
-    progressTweenRef.current?.kill()
-    setPhase('idle')
-    setStory('')
-    setAudioUrl(null)
-    setProgress(0)
-    setStatus('')
+    gen.reset()
     setTopic('')
   }
 
@@ -263,18 +195,19 @@ function MainApp() {
       : bgMode === 'galaxy' ? 'radial-gradient(ellipse at 50% 80%, #0a0d2a 0%, #060818 55%, #020510 100%)'
       : THEME.bg }}>
       <StarField mode={bgMode} />
-      <AmbientPlayer accent={THEME.accentColor} autoPlay={autoPlayAmbient} />
+      <AmbientPlayer accent={THEME.accentColor} autoPlay={autoPlayAmbient} categories={ambientCategories.length ? ambientCategories : undefined} />
 
       <SettingsDrawer
         open={settingsOpen}
         settings={settings}
+        audiences={audiences}
         onChange={setSettings}
         onClose={() => setSettingsOpen(false)}
         accent={THEME.accentColor}
       />
 
       {/* ── Onboarding ── */}
-      {showOnboarding && <OnboardingModal onDone={() => setOnboardingDone(true)} />}
+      {showOnboarding && <OnboardingModal onDone={() => setOnboardingDone(true)} audiences={audiences} />}
 
       {/* ── Top-right controls ── */}
       <div className="bg-toggle">

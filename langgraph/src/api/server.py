@@ -21,11 +21,13 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent.graph import StoryState, graph, ingest_sources
+from agent.config import AUDIENCES
+from agent.graph import StoryState, graph
+from agent.ingest import ingest_sources
 from api.auth import router as auth_router
 from api.deps import get_current_user
 from db.database import AsyncSessionLocal, Base, engine, get_db
@@ -579,6 +581,13 @@ class GenerateRequest(BaseModel):
     domain: str = Field(default="general science", max_length=100)
     voice: str = Field(default="21m00Tcm4TlvDq8ikWAM", description="ElevenLabs voice ID")
 
+    @field_validator("audience")
+    @classmethod
+    def audience_must_be_valid(cls, v: str) -> str:
+        if v not in AUDIENCES:
+            raise ValueError(f"audience must be one of: {AUDIENCES}")
+        return v
+
 
 # ── SSE helpers ───────────────────────────────────────────────────────────────
 
@@ -764,6 +773,15 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/config")
+async def config() -> dict:
+    """Return server-side configuration the frontend needs to stay in sync. No auth required."""
+    return {
+        "audiences":          AUDIENCES,
+        "ambient_categories": list(_AMBIENT_MANIFEST.keys()),
+    }
 
 
 @app.get("/voices")

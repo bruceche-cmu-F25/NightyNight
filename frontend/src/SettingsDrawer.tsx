@@ -7,25 +7,18 @@ export interface Settings {
 }
 
 interface Props {
-  open:     boolean
-  settings: Settings
-  onChange: (s: Settings) => void
-  onClose:  () => void
-  accent:   string
+  open:      boolean
+  settings:  Settings
+  audiences: string[]
+  onChange:  (s: Settings) => void
+  onClose:   () => void
+  accent:    string
 }
 
-const AMBIENT_OPTIONS  = ['auto', 'fire', 'rain', 'ocean', 'woods', 'cosmos', 'none']
-const AUDIENCE_OPTIONS = [
-  'curious adults',
-  'science enthusiasts',
-  'general public',
-  'children (ages 4–6)',
-  'children (ages 7–12)',
-  'children (ages 13+)',
-]
-const STYLE_OPTIONS = ['gentle bedtime', 'calm documentary', 'soft storytelling']
+const AMBIENT_OPTIONS = ['auto', 'fire', 'rain', 'ocean', 'woods', 'cosmos', 'none']
+const STYLE_OPTIONS   = ['gentle bedtime', 'calm documentary', 'soft storytelling']
 
-export default function SettingsDrawer({ open, settings, onChange, onClose, accent }: Props) {
+export default function SettingsDrawer({ open, settings, audiences, onChange, onClose, accent }: Props) {
   const drawerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -59,7 +52,7 @@ export default function SettingsDrawer({ open, settings, onChange, onClose, acce
           <label className="drawer-label">
             Audience
             <select className="drawer-select" value={settings.audience} onChange={set('audience')}>
-              {AUDIENCE_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+              {audiences.map(o => <option key={o} value={o}>{o}</option>)}
             </select>
           </label>
 

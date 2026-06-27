@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import * as THREE from 'three'
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
+import { SCROLL_ACTS } from './scrollActs'
 
 gsap.registerPlugin(ScrollTrigger)
 
@@ -138,7 +139,7 @@ export default function EarthScene({ children, onProgress }: Props) {
     let isDragging = false, prevX = 0, prevY = 0, scrollProg = 0
 
     const onPointerDown = (e: PointerEvent) => {
-      if (scrollProg > 0.66) return
+      if (scrollProg > SCROLL_ACTS.approach.start) return
       isDragging = true
       mountEl.style.cursor = 'grabbing'
       prevX = e.clientX; prevY = e.clientY
@@ -178,7 +179,7 @@ export default function EarthScene({ children, onProgress }: Props) {
       end:     'bottom bottom',
       scrub:   1.5,
       snap: {
-        snapTo:   [0, 0.30, 0.60, 0.80, 1.0],
+        snapTo:   SCROLL_ACTS.snapPoints,
         duration: { min: 0.2, max: 0.5 },
         delay:    0.4,
         ease:     'power1.inOut',
@@ -188,30 +189,30 @@ export default function EarthScene({ children, onProgress }: Props) {
         scrollProg = p
         onProgressRef.current?.(p)
 
-        if (p <= 0.20) {
+        if (p <= SCROLL_ACTS.hero.end) {
           camTarget.z     = 1.12
           camTarget.lookY = 2.5
           camTarget.fov   = 90
 
-        } else if (p <= 0.50) {
-          const t = (p - 0.20) / 0.30
+        } else if (p <= SCROLL_ACTS.pullback.end) {
+          const t = (p - SCROLL_ACTS.pullback.start) / (SCROLL_ACTS.pullback.end - SCROLL_ACTS.pullback.start)
           camTarget.z     = gsap.utils.interpolate(1.12, 6.0, t)
           camTarget.lookY = gsap.utils.interpolate(2.5, 0.0, t)
           camTarget.fov   = gsap.utils.interpolate(90, 45, t)
 
-        } else if (p <= 0.66) {
+        } else if (p <= SCROLL_ACTS.hold.end) {
           camTarget.z     = 6.0
           camTarget.lookY = 0.0
           camTarget.fov   = 45
 
-        } else if (p <= 0.82) {
-          const t = (p - 0.66) / 0.16
+        } else if (p <= SCROLL_ACTS.approach.end) {
+          const t = (p - SCROLL_ACTS.approach.start) / (SCROLL_ACTS.approach.end - SCROLL_ACTS.approach.start)
           camTarget.z     = gsap.utils.interpolate(6.0, 2.5, t)
           camTarget.lookY = 0.0
           camTarget.fov   = 45
 
         } else {
-          const t = (p - 0.82) / 0.18
+          const t = (p - SCROLL_ACTS.enter.start) / (SCROLL_ACTS.enter.end - SCROLL_ACTS.enter.start)
           camTarget.z     = gsap.utils.interpolate(2.5, 0.12, t)
           camTarget.lookY = 0.0
           camTarget.fov   = 45
@@ -239,8 +240,8 @@ export default function EarthScene({ children, onProgress }: Props) {
 
       // Auto-rotation slows during re-approach so we land cleanly
       if (!isDragging) {
-        const spin = scrollProg > 0.66
-          ? 0.0014 * Math.max(0, 1 - (scrollProg - 0.66) / 0.16)
+        const spin = scrollProg > SCROLL_ACTS.approach.start
+          ? 0.0014 * Math.max(0, 1 - (scrollProg - SCROLL_ACTS.approach.start) / (SCROLL_ACTS.approach.end - SCROLL_ACTS.approach.start))
           : 0.0014
         earthGroup.rotation.y += spin
       }

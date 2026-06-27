@@ -1,7 +1,5 @@
 import os
 import re
-import time
-from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -17,22 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.database import get_db
 from db.models import Story, User, user_is_premium
 from api.deps import JWT_ALGORITHM, JWT_SECRET, get_current_user
+from api.rate_limit import rate_limiter
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# ── In-memory rate limiter (per IP) ──────────────────────────────────────────
-_attempts: dict[str, list[float]] = defaultdict(list)
-_RL_WINDOW = 60   # seconds
-_RL_MAX    = 5    # attempts per window — conservative because this limiter is per-process;
-                  # in multi-worker/multi-instance deployments the effective limit is _RL_MAX × workers
-
 def _rate_limit(request: Request) -> None:
     ip = request.client.host if request.client else "unknown"
-    now = time.time()
-    _attempts[ip] = [t for t in _attempts[ip] if now - t < _RL_WINDOW]
-    if len(_attempts[ip]) >= _RL_MAX:
-        raise HTTPException(status_code=429, detail="Too many attempts, please try again later")
-    _attempts[ip].append(now)
+    rate_limiter.check(ip)
 
 _ACCESS_EXPIRE_MIN   = 15
 _REFRESH_EXPIRE_DAYS = 7   # Tokens survive logout — full revocation needs a DB blacklist or jti column

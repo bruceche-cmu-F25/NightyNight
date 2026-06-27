@@ -1,14 +1,14 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 
-const AUDIENCE_OPTIONS = [
-  { value: 'curious adults',       label: 'Curious adults',    desc: 'Science with depth and wonder' },
-  { value: 'children (ages 4–6)',  label: 'Kids (4–6)',        desc: 'Simple, magical, soothing'     },
-  { value: 'children (ages 7–12)', label: 'Kids (7–12)',       desc: 'Fun facts and adventure'       },
-  { value: 'children (ages 13+)',  label: 'Teens (13+)',       desc: 'Engaging and thought-provoking'},
-  { value: 'science enthusiasts',  label: 'Science fans',      desc: 'Rich detail and discovery'     },
-  { value: 'general public',       label: 'Everyone',          desc: 'Accessible and friendly'       },
-]
+// UI labels/descriptions for each canonical audience value (from backend /config).
+const AUDIENCE_META: Record<string, { label: string; desc: string }> = {
+  'curious adults':       { label: 'Curious adults', desc: 'Science with depth and wonder'   },
+  'science enthusiasts':  { label: 'Science fans',   desc: 'Rich detail and discovery'       },
+  'children (ages 4–6)':  { label: 'Kids (4–6)',     desc: 'Simple, magical, soothing'       },
+  'children (ages 7–12)': { label: 'Kids (7–12)',    desc: 'Fun facts and adventure'         },
+  'children (ages 13+)':  { label: 'Teens (13+)',    desc: 'Engaging and thought-provoking'  },
+}
 
 const STYLE_OPTIONS = [
   { value: 'gentle bedtime',     label: 'Gentle bedtime',     desc: 'Soft, slow, and calming'     },
@@ -19,10 +19,11 @@ const STYLE_OPTIONS = [
 const ACCENT = '#7fa8c8'
 
 interface Props {
-  onDone: () => void
+  onDone:    () => void
+  audiences: string[]
 }
 
-export default function OnboardingModal({ onDone }: Props) {
+export default function OnboardingModal({ onDone, audiences }: Props) {
   const { user, updatePreferences } = useAuth()
   const [audience, setAudience] = useState('curious adults')
   const [style,    setStyle]    = useState('gentle bedtime')
@@ -53,27 +54,30 @@ export default function OnboardingModal({ onDone }: Props) {
           Who are the stories for?
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', marginBottom: '1.5rem' }}>
-          {AUDIENCE_OPTIONS.map(o => (
-            <button
-              key={o.value}
-              type="button"
-              onClick={() => setAudience(o.value)}
-              style={{
-                background: audience === o.value
-                  ? `color-mix(in srgb, ${ACCENT} 12%, transparent)`
-                  : 'rgba(255,255,255,0.03)',
-                border: `1px solid ${audience === o.value ? ACCENT : 'rgba(255,255,255,0.08)'}`,
-                borderRadius: '10px',
-                padding: '0.6rem 0.75rem',
-                textAlign: 'left',
-                cursor: 'pointer',
-                transition: 'all 0.15s',
-              }}
-            >
-              <div style={{ color: audience === o.value ? ACCENT : 'rgba(200,210,230,0.75)', fontSize: '0.82rem', fontWeight: 500 }}>{o.label}</div>
-              <div style={{ color: '#5a7080', fontSize: '0.72rem', marginTop: '2px' }}>{o.desc}</div>
-            </button>
-          ))}
+          {audiences.map(value => {
+            const meta = AUDIENCE_META[value] ?? { label: value, desc: '' }
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setAudience(value)}
+                style={{
+                  background: audience === value
+                    ? `color-mix(in srgb, ${ACCENT} 12%, transparent)`
+                    : 'rgba(255,255,255,0.03)',
+                  border: `1px solid ${audience === value ? ACCENT : 'rgba(255,255,255,0.08)'}`,
+                  borderRadius: '10px',
+                  padding: '0.6rem 0.75rem',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+              >
+                <div style={{ color: audience === value ? ACCENT : 'rgba(200,210,230,0.75)', fontSize: '0.82rem', fontWeight: 500 }}>{meta.label}</div>
+                <div style={{ color: '#5a7080', fontSize: '0.72rem', marginTop: '2px' }}>{meta.desc}</div>
+              </button>
+            )
+          })}
         </div>
 
         {/* Style */}

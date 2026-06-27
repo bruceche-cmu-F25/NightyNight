@@ -1,19 +1,26 @@
 import { useEffect, useRef, useState } from 'react'
 
-const SOUNDS = [
-  { label: 'Rain',   icon: '🌧', category: 'rain'   },
-  { label: 'Ocean',  icon: '🌊', category: 'ocean'  },
-  { label: 'Fire',   icon: '🔥', category: 'fire'   },
-  { label: 'Woods',  icon: '🌲', category: 'woods'  },
-  { label: 'Cosmos', icon: '🌌', category: 'cosmos' },
-]
-
-interface Props {
-  accent: string
-  autoPlay?: string | null  // ambient category to auto-start (only if nothing playing yet)
+// UI metadata for each ambient category. Keys must match backend _AMBIENT_MANIFEST keys.
+const CATEGORY_META: Record<string, { label: string; icon: string }> = {
+  rain:   { label: 'Rain',   icon: '🌧' },
+  ocean:  { label: 'Ocean',  icon: '🌊' },
+  fire:   { label: 'Fire',   icon: '🔥' },
+  woods:  { label: 'Woods',  icon: '🌲' },
+  cosmos: { label: 'Cosmos', icon: '🌌' },
 }
 
-export default function AmbientPlayer({ accent, autoPlay }: Props) {
+interface Props {
+  accent:      string
+  autoPlay?:   string | null  // ambient category to auto-start (only if nothing playing yet)
+  categories?: string[]       // from /config; falls back to CATEGORY_META keys
+}
+
+export default function AmbientPlayer({ accent, autoPlay, categories }: Props) {
+  const sounds = (categories ?? Object.keys(CATEGORY_META)).map(cat => ({
+    category: cat,
+    ...(CATEGORY_META[cat] ?? { label: cat, icon: '🎵' }),
+  }))
+
   const [open,     setOpen]     = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
   const [playing,  setPlaying]  = useState(false)
@@ -34,7 +41,7 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
   // auto-start when generation begins (only if user hasn't manually picked a sound)
   useEffect(() => {
     if (!autoPlay || selected || !audioRef.current) return
-    const sound = SOUNDS.find(s => s.category === autoPlay)
+    const sound = sounds.find(s => s.category === autoPlay)
     if (!sound) return
     const a = audioRef.current
     a.src = `/ambient/${sound.category}`
@@ -55,11 +62,9 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
   const play = (label: string, category: string) => {
     const a = audioRef.current!
     if (selected === label) {
-      // toggle play/pause
       if (playing) { a.pause(); setPlaying(false) }
       else         { a.play(); setPlaying(true) }
     } else {
-      // fresh URL each time → backend picks a random file from the category
       a.src = `/ambient/${category}`
       a.volume = volume
       a.play().then(() => setPlaying(true)).catch(() => {})
@@ -78,7 +83,6 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
 
   return (
     <div className="ambient-wrap" ref={panelRef} style={{ '--accent': accent } as React.CSSProperties}>
-      {/* Main toggle button */}
       <button
         className={`ambient-toggle ${playing ? 'ambient-toggle--active' : ''}`}
         onClick={() => setOpen(o => !o)}
@@ -87,11 +91,10 @@ export default function AmbientPlayer({ accent, autoPlay }: Props) {
         {playing ? '♫' : '♪'}
       </button>
 
-      {/* Popover */}
       {open && (
         <div className="ambient-panel fade-in">
           <div className="ambient-list">
-            {SOUNDS.map(s => (
+            {sounds.map(s => (
               <button
                 key={s.label}
                 className={`ambient-row ${isPlaying(s.label) ? 'ambient-row--active' : ''}`}
