@@ -11,6 +11,8 @@ export default defineConfig({
       '/sounds':   'http://localhost:8000',
       '/ambient':  'http://localhost:8000',
       '/auth':     'http://localhost:8000',
+      '/voices':   'http://localhost:8000',
+      '/config':   'http://localhost:8000',
     },
   },
 })
