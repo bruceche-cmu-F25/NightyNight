@@ -18,9 +18,9 @@ import LandingPage from './pages/LandingPage'
 type VoiceEntry = { label: string; id: string }
 
 const FALLBACK_FREE_VOICES: VoiceEntry[] = [
-  { label: 'Blake', id: 'Blake' },
-  { label: 'Craig', id: 'Craig' },
-  { label: 'Clive', id: 'Clive' },
+  { label: 'Blake (warm, intimate male)', id: 'Blake' },
+  { label: 'Craig (refined British male)', id: 'Craig' },
+  { label: 'Clive (calm, British male)', id: 'Clive' },
 ]
 
 const TOPIC_AMBIENT: [string[], string][] = [
@@ -37,12 +37,6 @@ function topicToAmbient(topic: string): string {
     if (keywords.some(kw => lower.includes(kw))) return category
   }
   return 'cosmos'
-}
-
-const AUDIENCE_BG: Record<string, BackgroundMode> = {
-  'children (ages 4–6)':  'dreamy',
-  'children (ages 7–12)': 'galaxy',
-  'children (ages 13+)':  'galaxy',
 }
 
 const THEME = THEMES.default
@@ -84,6 +78,11 @@ function MainApp() {
     'curious adults', 'science enthusiasts',
     'children (ages 4–6)', 'children (ages 7–12)', 'children (ages 13+)',
   ])
+  const [audienceBg, setAudienceBg] = useState<Record<string, string>>({
+    'children (ages 4–6)':  'dreamy',
+    'children (ages 7–12)': 'galaxy',
+    'children (ages 13+)':  'galaxy',
+  })
 
   const gen = useStoryGeneration({ topic, duration, voice, settings, accessToken })
   const { phase, status, progress, story, audioUrl, ttsError, errorMsg } = gen
@@ -121,13 +120,14 @@ function MainApp() {
       .then(data => {
         if (Array.isArray(data.audiences))          setAudiences(data.audiences)
         if (Array.isArray(data.ambient_categories)) setAmbientCategories(data.ambient_categories)
+        if (data.audience_bg && typeof data.audience_bg === 'object') setAudienceBg(data.audience_bg)
       })
       .catch(() => { /* keep fallbacks */ })
   }, [])
 
   // Auto-switch background when audience changes
   useEffect(() => {
-    setBgMode(AUDIENCE_BG[settings.audience] ?? 'stars')
+    setBgMode((audienceBg[settings.audience] ?? 'stars') as BackgroundMode)
   }, [settings.audience])
 
   // Effect 2: generating animations — logo glow, dot wave, shimmer sweep

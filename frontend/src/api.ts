@@ -11,6 +11,7 @@ export interface NodeDoneEvent {
   event: 'node_done'
   node: string
   chapter: number | null
+  progress: number
   message: string
 }
 
@@ -27,13 +28,6 @@ export interface ErrorEvent {
 }
 
 export type SSEEvent = NodeDoneEvent | DoneEvent | ErrorEvent
-
-export const NODE_PROGRESS: Record<string, number> = {
-  plan_story:        10,
-  write_chapter:     65,
-  assemble_chapters: 80,
-  polish_story:      92,
-}
 
 export async function* streamGenerate(req: GenerateRequest, signal?: AbortSignal, token?: string): AsyncGenerator<SSEEvent> {
   const resp = await fetch('/generate', {

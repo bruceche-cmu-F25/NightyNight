@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -25,7 +26,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agent.config import AUDIENCES
+from agent.config import AUDIENCE_CATALOG, AUDIENCES, get_audience
 from agent.graph import StoryState, graph
 from agent.ingest import ingest_sources
 from api.auth import router as auth_router
@@ -149,8 +150,6 @@ def _prepare_tts_text(text: str) -> str:
     return text.strip()
 
 
-_HEADING_RE = re.compile(r'^\s*(#{1,3}\s+.+|[A-Z][A-Z\s\d:,\-]{10,})\s*$', re.MULTILINE)
-
 def _split_into_chapter_segments(text: str, n_chapters: int) -> list[str]:
     """Split story text into n_chapters paragraph-proportional segments.
 
@@ -174,20 +173,15 @@ def _split_into_chapter_segments(text: str, n_chapters: int) -> list[str]:
     return result
 
 
-def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
-    """Split text into (chunk, is_chapter_boundary) tuples.
+def _chunk_text(text: str, max_chars: int = 4000) -> list[str]:
+    """Split pre-cleaned text into chunks no larger than max_chars.
 
-    Strategy:
-      1. Split on chapter/section headings first — these are natural hard breaks.
-      2. Within each section, split on blank-line paragraph boundaries.
-      3. Only sentence-split a paragraph that exceeds max_chars.
-
-    Returns a list of (text_chunk, is_chapter_boundary) where is_chapter_boundary=True
-    marks the *start* of a new chapter (used to insert longer silence before it).
+    Splits on paragraph boundaries first; falls back to sentence splitting for
+    paragraphs that still exceed max_chars. Expects text already processed by
+    _prepare_tts_text (no headings, no markdown).
     """
 
     def _sentences(para: str) -> list[str]:
-        """Split a paragraph into sentences as a fallback for long paragraphs."""
         sents = re.split(r'(?<=[.!?。！？])\s+', para)
         chunks: list[str] = []
         cur = ""
@@ -209,45 +203,13 @@ def _chunk_text(text: str, max_chars: int = 4000) -> list[tuple[str, bool]]:
             chunks.append(cur.strip())
         return [c for c in chunks if c]
 
-    # Split into sections on heading boundaries
-    sections: list[tuple[str, bool]] = []  # (text, is_chapter_start)
-    last_end = 0
-    is_first = True
-    for m in _HEADING_RE.finditer(text):
-        preceding = text[last_end : m.start()].strip()
-        if preceding:
-            sections.append((preceding, False))
-        heading = m.group(0).strip()
-        # Combine heading with the text that follows until next heading
-        # (we'll handle that below)
-        sections.append((heading, not is_first))
-        is_first = False
-        last_end = m.end()
-    tail = text[last_end:].strip()
-    if tail:
-        sections.append((tail, False))
-
-    if not sections:
-        sections = [(text, False)]
-
-    result: list[tuple[str, bool]] = []
-    for section_text, is_chapter in sections:
-        # Split section into paragraphs
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', section_text) if p.strip()]
-        if not paragraphs:
-            continue
-        first_para = True
-        for para in paragraphs:
-            mark_chapter = is_chapter and first_para
-            first_para = False
-            if len(para) <= max_chars:
-                result.append((para, mark_chapter))
-            else:
-                # Sentence-level fallback
-                sents = _sentences(para)
-                for j, s in enumerate(sents):
-                    result.append((s, mark_chapter and j == 0))
-    return [(c, b) for c, b in result if c]
+    result: list[str] = []
+    for para in [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]:
+        if len(para) <= max_chars:
+            result.append(para)
+        else:
+            result.extend(_sentences(para))
+    return [c for c in result if c]
 
 
 _AMBIENT_MANIFEST: dict[str, list[str]] = {
@@ -290,32 +252,41 @@ def _pick_ambient_url(ambient: str) -> str | None:
 _ELEVENLABS_TTS_URL  = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 _ELEVENLABS_MAX_CHARS = 39_000  # ElevenLabs hard limit per request
 
-# Curated ElevenLabs voices for bedtime narration.
-# Keys are the friendly names shown in the UI; values are stable voice IDs.
-ELEVENLABS_VOICES: dict[str, str] = {
-    # ── User's own voices (work on free plan) ────────────────────────────────
-    "True Crime & Horror Narrator":          "tZssYepgGaQmegsMEXjK",
-    "Kyle Manning":                          "q8hD3YAFEqLvfbspywun",
-    "Archer (deep, steady, relaxing)":       "X0K9Z1Bor9SpbE1wSaoe",
-    "Adam Stone (smooth, deep, relaxed)":    "NFG5qt843uXKj4pFvR7C",
-    "Christopher (gentle, trustworthy)":     "G17SuINrv2H9FC6nvetn",
-    "John Doe (deep)":                       "EiNlNiXeDU1pqqOPrYMO",
-    "Autumn Veil (warm, reflective female)": "KoVIHoyLDrQyd4pGalbs",
-    # ── ElevenLabs library voices (require paid plan) ────────────────────────
-    "Rachel (warm female)":                  "21m00Tcm4TlvDq8ikWAM",
-    "Aria (calm female)":                    "9BWtsMINqrJLrRacOk9x",
-    "Adam (deep male)":                      "pNInz6obpgDQGcFmaJgB",
-    "Eric (calm male)":                      "cjVigY5qzO86Huf0OWal",
-    "Charlotte (soft female)":               "XB0fDUnXU5powFXDhCwa",
-    "Daniel (narrative male)":               "onwK4e9ZLuTAKqWW03F9",
-}
+
+@dataclass(frozen=True)
+class VoiceSpec:
+    id:       str
+    label:    str
+    provider: str  # "elevenlabs" | "inworld"
+    tier:     str  # "free" | "premium"
 
 
-_AUDIENCE_SPEED: dict[str, float] = {
-    "children (ages 4–6)":  0.70,
-    "children (ages 7–12)": 0.75,
-    "children (ages 13+)":  0.80,
-}
+VOICE_CATALOG: list[VoiceSpec] = [
+    # ── Free tier (Inworld) ────────────────────────────────────────────────────
+    VoiceSpec("Blake", "Blake (warm, intimate male)",          "inworld",    "free"),
+    VoiceSpec("Craig", "Craig (refined British male)",         "inworld",    "free"),
+    VoiceSpec("Clive", "Clive (calm, British male)",           "inworld",    "free"),
+    # ── Premium tier (ElevenLabs — user's own voices) ─────────────────────────
+    VoiceSpec("tZssYepgGaQmegsMEXjK", "True Crime & Horror Narrator",           "elevenlabs", "premium"),
+    VoiceSpec("q8hD3YAFEqLvfbspywun", "Kyle Manning",                           "elevenlabs", "premium"),
+    VoiceSpec("X0K9Z1Bor9SpbE1wSaoe", "Archer (deep, steady, relaxing)",        "elevenlabs", "premium"),
+    VoiceSpec("NFG5qt843uXKj4pFvR7C", "Adam Stone (smooth, deep, relaxed)",     "elevenlabs", "premium"),
+    VoiceSpec("G17SuINrv2H9FC6nvetn", "Christopher (gentle, trustworthy)",      "elevenlabs", "premium"),
+    VoiceSpec("EiNlNiXeDU1pqqOPrYMO", "John Doe (deep)",                        "elevenlabs", "premium"),
+    VoiceSpec("KoVIHoyLDrQyd4pGalbs", "Autumn Veil (warm, reflective female)",  "elevenlabs", "premium"),
+    # ── Premium tier (ElevenLabs library voices) ──────────────────────────────
+    VoiceSpec("21m00Tcm4TlvDq8ikWAM", "Rachel (warm female)",   "elevenlabs", "premium"),
+    VoiceSpec("9BWtsMINqrJLrRacOk9x", "Aria (calm female)",     "elevenlabs", "premium"),
+    VoiceSpec("pNInz6obpgDQGcFmaJgB", "Adam (deep male)",       "elevenlabs", "premium"),
+    VoiceSpec("cjVigY5qzO86Huf0OWal", "Eric (calm male)",       "elevenlabs", "premium"),
+    VoiceSpec("XB0fDUnXU5powFXDhCwa", "Charlotte (soft female)", "elevenlabs", "premium"),
+    VoiceSpec("onwK4e9ZLuTAKqWW03F9", "Daniel (narrative male)", "elevenlabs", "premium"),
+]
+
+_VOICE_BY_ID: dict[str, VoiceSpec] = {v.id: v for v in VOICE_CATALOG}
+_DEFAULT_FREE_VOICE_ID = "Blake"
+
+
 _DEFAULT_SPEED = 0.80
 
 
@@ -368,7 +339,7 @@ def _synthesize_blocking(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     api_key = os.environ.get("ELEVENLABS_API_KEY")
-    speed = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
+    speed = get_audience(audience).tts_speed
 
     if num_chapters > 1:
         segments = [s.strip() for s in _split_into_chapter_segments(story_text, num_chapters) if s.strip()]
@@ -381,45 +352,38 @@ def _synthesize_blocking(
 
     # Send as one request when under ElevenLabs' 40k-char limit (the normal case).
     # Raw-byte concatenation of multiple MP3s produces broken duration metadata in browsers.
-    if len(tts_text) <= _ELEVENLABS_MAX_CHARS:
-        chunk_tuples = [(tts_text, False)]
-    else:
-        chunk_tuples = _chunk_text(tts_text, max_chars=_ELEVENLABS_MAX_CHARS)
-    logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f, chapters=%d)", len(chunk_tuples), speed, num_chapters)
+    chunks: list[str] = (
+        [tts_text] if len(tts_text) <= _ELEVENLABS_MAX_CHARS
+        else _chunk_text(tts_text, max_chars=_ELEVENLABS_MAX_CHARS)
+    )
+    logger.info("TTS: synthesizing %d chunk(s) (speed=%.2f, chapters=%d)", len(chunks), speed, num_chapters)
 
     raw_results: dict[int, bytes] = {}
-    with ThreadPoolExecutor(max_workers=min(len(chunk_tuples), 2)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(chunks), 2)) as pool:
         futures = {
             pool.submit(_synthesize_chunk, i, text, voice_name, api_key, speed): i
-            for i, (text, _) in enumerate(chunk_tuples)
+            for i, text in enumerate(chunks)
         }
         for future in as_completed(futures):
             idx, raw = future.result()
             raw_results[idx] = raw
-            logger.info("TTS: chunk %d/%d done (%d KB)", idx + 1, len(chunk_tuples), len(raw) // 1024)
+            logger.info("TTS: chunk %d/%d done (%d KB)", idx + 1, len(chunks), len(raw) // 1024)
 
     # Concatenate chunks in order and write to disk — no pydub, no PCM in memory.
     with open(out_path, "wb") as f:
-        for i in range(len(chunk_tuples)):
+        for i in range(len(chunks)):
             f.write(raw_results[i])
 
     total_bytes = sum(len(b) for b in raw_results.values())
     duration_ms = total_bytes * 1000 // 16000  # rough estimate at 128 kbps
-    return duration_ms, len(chunk_tuples)
+    return duration_ms, len(chunks)
 
 
 # ── Inworld TTS ───────────────────────────────────────────────────────────────
 
-_INWORLD_TTS_URL      = "https://api.inworld.ai/tts/v1/voice:stream"
-_INWORLD_MAX_CHARS    = 1_800   # hard limit 2000; 200 char safety margin
-_INWORLD_API_KEY      = os.environ.get("INWORLD_API_KEY", "")
-_INWORLD_DEFAULT_VOICE = "Blake"
-
-INWORLD_VOICES: dict[str, str] = {
-    "Blake (warm, intimate male)":    "Blake",
-    "Craig (refined British male)":   "Craig",
-    "Clive (calm, British male)":     "Clive",
-}
+_INWORLD_TTS_URL   = "https://api.inworld.ai/tts/v1/voice:stream"
+_INWORLD_MAX_CHARS = 1_800   # hard limit 2000; 200 char safety margin
+_INWORLD_API_KEY   = os.environ.get("INWORLD_API_KEY", "")
 
 
 def _inworld_chunk_bytes(text: str, voice_id: str, api_key: str, speed: float = _DEFAULT_SPEED) -> bytes:
@@ -478,9 +442,9 @@ def _synthesize_inworld_blocking(
     Same signature as _synthesize_blocking so the call site swap is minimal.
     Returns (duration_ms_estimate, chunks_synthesized).
     """
-    _valid_inworld = set(INWORLD_VOICES.values())
-    voice_id = voice_name if voice_name in _valid_inworld else _INWORLD_DEFAULT_VOICE
-    speed    = _AUDIENCE_SPEED.get(audience, _DEFAULT_SPEED)
+    _valid_inworld = {v.id for v in VOICE_CATALOG if v.provider == "inworld"}
+    voice_id = voice_name if voice_name in _valid_inworld else _DEFAULT_FREE_VOICE_ID
+    speed    = get_audience(audience).tts_speed
 
     # Clean FIRST, then chunk — avoids chunk boundaries landing inside markdown artifacts
     tts_text = _prepare_tts_text(story_text)
@@ -488,7 +452,7 @@ def _synthesize_inworld_blocking(
 
     logger.info("Inworld TTS: synthesizing %d chunk(s) (speed=%.2f)", len(chunks), speed)
     all_bytes: list[bytes] = []
-    for i, (chunk_text, _) in enumerate(chunks):
+    for i, chunk_text in enumerate(chunks):
         audio = _inworld_chunk_bytes(chunk_text, voice_id, _INWORLD_API_KEY, speed)
         all_bytes.append(audio)
         logger.info("Inworld TTS: chunk %d/%d done (%d KB)", i + 1, len(chunks), len(audio) // 1024)
@@ -503,50 +467,64 @@ def _synthesize_inworld_blocking(
 
 # ── Auth / usage helpers ──────────────────────────────────────────────────────
 
-async def _check_limit_or_raise(user_id: str) -> None:
-    """Read-only pre-flight check — gives a clean 429 before streaming starts.
+def _check_quota(user: User, today: date, is_premium: bool = False) -> None:
+    """Read-only quota check on an already-fetched User row.
 
-    Does not increment counters; the atomic increment happens later inside
-    _reserve_and_save_story once the story text is ready.
+    Raises HTTP 429 if the user is over limit. Does not mutate any counters.
+    Premium users are always allowed through.
     """
+    if is_premium:
+        return
+    daily = user.daily_count if user.daily_reset_at >= today else 0
+    if daily >= DAILY_LIMIT:
+        raise HTTPException(status_code=429, detail="Daily limit reached")
+
+
+def _consume_quota(user: User, today: date, is_premium: bool = False) -> None:
+    """Reset stale counters, check limit, then increment. Mutates the User row in place.
+
+    Meant to run inside a SELECT FOR UPDATE transaction so concurrent requests
+    don't race past the limit. Premium users bypass the check.
+    """
+    if is_premium:
+        return
+    if user.daily_reset_at < today:
+        user.daily_count    = 0
+        user.daily_reset_at = today
+    if user.monthly_reset_at < today.replace(day=1):
+        user.monthly_count    = 0
+        user.monthly_reset_at = today.replace(day=1)
+    if user.daily_count >= DAILY_LIMIT:
+        raise HTTPException(status_code=429, detail="Daily limit reached")
+    user.daily_count  += 1
+    user.monthly_count += 1
+
+
+async def _check_limit_or_raise(user_id: str, is_premium: bool = False) -> None:
+    """Read-only pre-flight guard — gives a clean 429 before streaming starts."""
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
-        today = date.today()
-        daily = user.daily_count if user.daily_reset_at >= today else 0
-        if daily >= DAILY_LIMIT:
-            raise HTTPException(status_code=429, detail="Daily limit reached")
+        _check_quota(user, date.today(), is_premium)
 
 
 async def _reserve_and_save_story(
     user_id: str, topic: str, story_text: str, duration_min: int,
+    is_premium: bool = False,
 ) -> str:
-    """Atomically increment quota counters and persist the generated story text.
+    """Atomically consume a quota slot and persist the generated story text.
 
-    Combining these two writes in one transaction ensures a quota slot is never
-    consumed without a corresponding story record — if either write fails, both
-    roll back together.
+    Both writes share one transaction so a slot is never consumed without a
+    story record — if either fails, both roll back. Premium users skip quota.
 
-    Returns the new story's UUID so audio_url can be patched in later via
-    _update_story_audio once synthesis completes.
-    Raises HTTP 429 if the limit was reached by a concurrent request.
+    Returns the new story's UUID so audio_url can be patched later.
     """
     async with AsyncSessionLocal() as db:
         async with db.begin():
-            stmt = select(User).where(User.id == user_id).with_for_update()
-            locked = (await db.execute(stmt)).scalar_one()
+            locked = (await db.execute(
+                select(User).where(User.id == user_id).with_for_update()
+            )).scalar_one()
 
-            today = date.today()
-            if locked.daily_reset_at < today:
-                locked.daily_count = 0
-                locked.daily_reset_at = today
-            if locked.monthly_reset_at < today.replace(day=1):
-                locked.monthly_count = 0
-                locked.monthly_reset_at = today.replace(day=1)
-
-            if locked.daily_count >= DAILY_LIMIT:
-                raise HTTPException(status_code=429, detail="Daily limit reached")
-            locked.daily_count  += 1
-            locked.monthly_count += 1
+            _consume_quota(locked, date.today(), is_premium)
 
             story = Story(
                 user_id=user_id,
@@ -599,7 +577,7 @@ def _initial_story_state(request: "GenerateRequest") -> StoryState:
         "style":        request.style,
         "audience":     request.audience,
         "domain":       request.domain,
-        "tts_speed":    _AUDIENCE_SPEED.get(request.audience, _DEFAULT_SPEED),
+        "tts_speed":    get_audience(request.audience).tts_speed,
     }
 
 
@@ -608,36 +586,46 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-# Node names that represent meaningful user-facing progress steps.
-# Nodes not in this set (e.g. routing helpers) are ignored in the stream.
-_PROGRESS_NODES = {
-    "plan_story",
-    "write_chapter",
-    "assemble_chapters",
-    "polish_story",
+# Progress percentages emitted with each node_done event.
+# Nodes absent from this map (e.g. routing helpers) are silently skipped.
+_NODE_PROGRESS: dict[str, int] = {
+    "plan_story":        10,
+    "write_chapter":     65,
+    "assemble_chapters": 80,
+    "polish_story":      92,
 }
 
 
-def _audio_content_hash(text: str, is_premium: bool) -> str:
-    """Stable cache key for a (tier, text) pair — first 16 hex chars of SHA-256."""
-    tier = "premium" if is_premium else "free"
-    return hashlib.sha256(f"{tier}:{text}".encode()).hexdigest()[:16]
+class AudioCache:
+    """Owns the full lifecycle of a synthesized audio file: key → path → URL.
 
-
-def _audio_local_path(content_hash: str) -> str:
-    return os.path.join(AUDIO_DIR, f"{content_hash}.mp3")
-
-
-def _finalize_audio(content_hash: str) -> str:
-    """Upload local MP3 to R2 and return the public URL (blocking).
-
-    Falls back to the local /audio/ mount when R2 is not configured (dev).
+    One adapter of a storage seam — current implementation uses local filesystem
+    + optional R2 upload. Swap for a Redis + S3 adapter without touching callers.
     """
-    local_path = _audio_local_path(content_hash)
-    r2_url = _upload_to_r2(local_path, f"{content_hash}.mp3")
-    url = r2_url or f"/audio/{content_hash}.mp3"
-    logger.info("TTS complete. audio_url=%s", url)
-    return url
+
+    def __init__(self, audio_dir: str) -> None:
+        self._dir = audio_dir
+
+    def key(self, text: str, is_premium: bool) -> str:
+        """Stable 16-hex-char cache key for a (tier, text) pair."""
+        tier = "premium" if is_premium else "free"
+        return hashlib.sha256(f"{tier}:{text}".encode()).hexdigest()[:16]
+
+    def path(self, key: str) -> str:
+        return os.path.join(self._dir, f"{key}.mp3")
+
+    def is_cached(self, key: str) -> bool:
+        return os.path.exists(self.path(key))
+
+    def url(self, key: str) -> str:
+        """Upload to R2 (if configured) and return the public URL. Blocking."""
+        r2_url = _upload_to_r2(self.path(key), f"{key}.mp3")
+        resolved = r2_url or f"/audio/{key}.mp3"
+        logger.info("TTS complete. audio_url=%s", resolved)
+        return resolved
+
+
+audio_cache = AudioCache(AUDIO_DIR)
 
 
 def _run_tts(
@@ -648,103 +636,126 @@ def _run_tts(
     num_chapters: int,
     is_premium: bool,
 ) -> tuple[int, int]:
-    """Blocking TTS dispatch: ElevenLabs for premium users, Inworld for free."""
-    if is_premium:
-        logger.info("[tts] provider=elevenlabs voice=%s", voice)
+    """Blocking TTS dispatch: routes by voice registry, falls back to is_premium."""
+    spec     = _VOICE_BY_ID.get(voice)
+    provider = spec.provider if spec else ("elevenlabs" if is_premium else "inworld")
+    logger.info("[tts] provider=%s voice=%s", provider, voice)
+    if provider == "elevenlabs":
         return _synthesize_blocking(text, voice, out_path, audience, num_chapters)
-    logger.info("[tts] provider=inworld voice=%s", voice)
     return _synthesize_inworld_blocking(text, voice, out_path, audience, num_chapters)
 
 
-async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is_premium: bool = False) -> AsyncIterator[str]:
-    """Run the LangGraph graph and yield SSE events at each node completion.
+def _launch_tts_if_needed(
+    polished:     str,
+    voice:        str,
+    audience:     str,
+    num_chapters: int,
+    is_premium:   bool,
+    loop:         asyncio.AbstractEventLoop,
+) -> tuple["asyncio.Future[tuple[int, int]] | None", str]:
+    """Start background TTS synthesis; return (future, cache_key).
 
-    stream_mode="updates" yields only the fields changed by each node, not the
-    full state. We therefore maintain current_state ourselves, merging every
-    update into it so we always have the complete picture when building events.
-
-    TTS synthesis is kicked off as a background executor task the moment
-    polish_story finishes (final text is ready then), so it runs in parallel
-    with the SSE delivery and Streamlit re-render rather than waiting for a
-    second client request.
+    Returns future=None on a cache hit — the caller resolves the URL via
+    audio_cache.url(cache_key) without re-synthesizing.
     """
+    cache_key = audio_cache.key(polished, is_premium)
+    audio_out = audio_cache.path(cache_key)
+    if audio_cache.is_cached(cache_key):
+        logger.info("TTS cache hit — skipping synthesis.")
+        return None, cache_key
+    future = loop.run_in_executor(
+        None, _run_tts,
+        polished, voice, audio_out, audience, num_chapters, is_premium,
+    )
+    return future, cache_key
 
-    initial_state = _initial_story_state(request)
 
-    # Seed current_state with the inputs; nodes will fill in the rest.
+async def _keepalive_until_done(future: "asyncio.Future") -> AsyncIterator[str]:
+    """Yield SSE keepalive pings every 5 s until the background future completes.
+
+    Prevents proxies and load-balancers from closing the SSE connection during
+    long synthesis. Reusable for any background executor future.
+    """
+    while not future.done():
+        yield ": tts-pending\n\n"
+        await asyncio.sleep(5)
+
+
+async def _stream_graph(
+    request:    "GenerateRequest",
+    user_id:    str | None = None,
+    is_premium: bool = False,
+) -> AsyncIterator[str]:
+    """Run the LangGraph pipeline and yield SSE events.
+
+    stream_mode="updates" gives only the fields changed by each node; we merge
+    every delta into current_state to keep a full picture for event building.
+
+    TTS synthesis starts in a background executor as soon as polish_story
+    finishes, so it runs in parallel with SSE delivery instead of blocking it.
+    """
+    initial_state  = _initial_story_state(request)
     current_state: dict = dict(initial_state)
 
-    synthesis_future = None
-    content_hash: str | None = None
-    story_id: str | None = None
+    synthesis_future: "asyncio.Future | None" = None
+    cache_key:     str | None = None
+    story_id:         str | None = None
 
     try:
         async for chunk in graph.astream(initial_state, stream_mode="updates"):
             for node_name, node_updates in chunk.items():
-                # node_updates is only the delta — merge it into the full state
                 if isinstance(node_updates, dict):
                     current_state.update(node_updates)
 
-                # polish_story just finished — final_story is ready. Kick off TTS now
-                # so synthesis runs in parallel with SSE delivery + Streamlit re-render.
                 if node_name == "polish_story" and synthesis_future is None:
                     polished = current_state.get("final_story")
                     if polished:
-                        content_hash = _audio_content_hash(polished, is_premium)
-                        audio_out = _audio_local_path(content_hash)
-                        if not os.path.exists(audio_out):
-                            loop = asyncio.get_running_loop()
-                            synthesis_future = loop.run_in_executor(
-                                None, _run_tts,
-                                polished, request.voice, audio_out, request.audience,
-                                current_state.get("num_chapters", 1), is_premium,
-                            )
-                        else:
-                            logger.info("TTS cache hit — skipping synthesis.")
+                        loop = asyncio.get_running_loop()
+                        synthesis_future, cache_key = _launch_tts_if_needed(
+                            polished, request.voice, request.audience,
+                            current_state.get("num_chapters", 1), is_premium, loop,
+                        )
                         if user_id:
                             try:
                                 story_id = await _reserve_and_save_story(
-                                    user_id, request.topic, polished, request.duration_min
+                                    user_id, request.topic, polished, request.duration_min,
+                                    is_premium,
                                 )
                             except Exception as exc:
                                 logger.warning("Failed to reserve story slot: %s", exc)
                                 raise
 
-                if node_name not in _PROGRESS_NODES:
+                if node_name not in _NODE_PROGRESS:
                     continue
 
-                # chapter_index is set per-Send during parallel writes
                 chapter_idx = current_state.get("chapter_index")
                 chapter_num = chapter_idx + 1 if isinstance(chapter_idx, int) else None
-
                 yield _sse({
-                    "event": "node_done",
-                    "node": node_name,
-                    "chapter": chapter_num,
-                    "message": current_state.get("status_message", ""),
+                    "event":    "node_done",
+                    "node":     node_name,
+                    "chapter":  chapter_num,
+                    "progress": _NODE_PROGRESS[node_name],
+                    "message":  current_state.get("status_message", ""),
                 })
 
-        # Graph complete — await TTS (may already be done by now)
+        # Graph done — collect audio (TTS may still be running in background)
         final_story = current_state.get("final_story")
         audio_url:  str | None = None
         tts_error:  str | None = None
 
         if synthesis_future is not None:
             try:
-                # Send keepalive comments while TTS is running so the proxy
-                # doesn't close the SSE connection during a long synthesis.
-                while not synthesis_future.done():
-                    yield ": tts-pending\n\n"
-                    await asyncio.sleep(5)
+                async for ping in _keepalive_until_done(synthesis_future):
+                    yield ping
                 await synthesis_future
                 audio_url = await asyncio.get_running_loop().run_in_executor(
-                    None, _finalize_audio, content_hash
+                    None, audio_cache.url, cache_key
                 )
             except Exception as exc:
                 logger.error("Background TTS synthesis failed: %s", exc)
                 tts_error = str(exc)
-        elif content_hash and os.path.exists(_audio_local_path(content_hash)):
-            audio_url = f"/audio/{content_hash}.mp3"
+        elif cache_key and audio_cache.is_cached(cache_key):
+            audio_url = audio_cache.url(cache_key)
 
         if final_story:
             if story_id and audio_url:
@@ -753,16 +764,15 @@ async def _stream_graph(request: GenerateRequest, user_id: str | None = None, is
                 except Exception as exc:
                     logger.warning("Failed to update story audio_url: %s", exc)
             yield _sse({
-                "event": "done",
+                "event":       "done",
                 "final_story": final_story,
-                "audio_url": audio_url,
-                "tts_error": tts_error,
+                "audio_url":   audio_url,
+                "tts_error":   tts_error,
             })
         else:
             yield _sse({"event": "error", "message": "Graph completed but final_story is missing."})
 
     except ValueError as exc:
-        # Structured errors from _parse_chapter_plans or prompt validation
         yield _sse({"event": "error", "message": str(exc)})
     except Exception as exc:  # noqa: BLE001
         yield _sse({"event": "error", "message": f"Unexpected error: {exc}"})
@@ -780,6 +790,7 @@ async def config() -> dict:
     """Return server-side configuration the frontend needs to stay in sync. No auth required."""
     return {
         "audiences":          AUDIENCES,
+        "audience_bg":        {a.name: a.bg_mode for a in AUDIENCE_CATALOG},
         "ambient_categories": list(_AMBIENT_MANIFEST.keys()),
     }
 
@@ -788,14 +799,8 @@ async def config() -> dict:
 async def voices() -> dict:
     """Return the voice catalog grouped by tier. No auth required."""
     return {
-        "free": [
-            {"label": label, "id": voice_id}
-            for label, voice_id in INWORLD_VOICES.items()
-        ],
-        "premium": [
-            {"label": label, "id": voice_id}
-            for label, voice_id in ELEVENLABS_VOICES.items()
-        ],
+        tier: [{"label": v.label, "id": v.id} for v in VOICE_CATALOG if v.tier == tier]
+        for tier in ("free", "premium")
     }
 
 
@@ -844,9 +849,10 @@ async def generate(
     - `done`       — pipeline complete; includes `final_story` and `audio_url`
     - `error`      — something went wrong; includes `message`
     """
-    await _check_limit_or_raise(str(current_user.id))
+    is_premium = user_is_premium(current_user)
+    await _check_limit_or_raise(str(current_user.id), is_premium)
     return StreamingResponse(
-        _stream_graph(request, str(current_user.id), user_is_premium(current_user)),
+        _stream_graph(request, str(current_user.id), is_premium),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

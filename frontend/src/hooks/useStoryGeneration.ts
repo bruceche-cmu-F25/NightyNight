@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from 'react'
 import gsap from 'gsap'
-import { streamGenerate, NODE_PROGRESS, type GenerateRequest } from '../api'
+import { streamGenerate, type GenerateRequest } from '../api'
 import type { Settings } from '../SettingsDrawer'
 
 export type Phase = 'idle' | 'generating' | 'done' | 'error'
@@ -64,7 +64,7 @@ export function useStoryGeneration({ topic, duration, voice, settings, accessTok
     try {
       for await (const ev of streamGenerate(req, ctrl.signal, accessToken ?? undefined)) {
         if (ev.event === 'node_done') {
-          const pct = NODE_PROGRESS[ev.node] ?? 0
+          const pct = ev.progress ?? 0
           progressTweenRef.current?.kill()
           setProgress(p => Math.max(p, pct))
 

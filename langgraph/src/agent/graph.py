@@ -13,6 +13,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Send
 from typing_extensions import TypedDict
 
+from agent.config import get_audience
 from agent.prompts import (
     select_chapter_prompt,
     select_plan_prompt,
@@ -79,33 +80,8 @@ _DURATION_TO_CHAPTERS = [
     (25,  6),
 ]
 
-# Natural voice WPM (measured: ~160 WPM at speed 1.0 for ElevenLabs voices).
-# Slightly higher values buffer against LLM word-count overshoot.
-# Formula: target_words = duration × natural_wpm × speed × headroom
-_AUDIENCE_WPM: dict[str, int] = {
-    "children (ages 4–6)":  155,
-    "children (ages 7–12)": 160,
-    "children (ages 13+)":  165,
-}
-_DEFAULT_WPM = 170
-_DEFAULT_SPEED: float = 0.80   # fallback when tts_speed not in state
-_TTS_HEADROOM: float = 0.95    # reserve ~5% for chapter pauses and natural breathing
-
-_AUDIENCE_MAX_WORDS_PER_CHAPTER: dict[str, int] = {
-    "children (ages 4–6)":  650,
-    "children (ages 7–12)": 1000,
-}
-
-
-def _cap_words_per_chapter(audience: str, words: int) -> int:
-    cap = _AUDIENCE_MAX_WORDS_PER_CHAPTER.get(audience)
-    return min(words, cap) if cap else words
-
-# Young children also get fewer chapters so each stays simple.
-_AUDIENCE_MAX_CHAPTERS: dict[str, int] = {
-    "children (ages 4–6)":  4,
-    "children (ages 7–12)": 5,
-}
+_DEFAULT_SPEED: float = 0.80  # fallback when tts_speed not in state
+_TTS_HEADROOM:  float = 0.95  # reserve ~5% for chapter pauses and natural breathing
 
 
 def derive_story_params(
@@ -114,21 +90,20 @@ def derive_story_params(
     tts_speed: float | None = None,
 ) -> tuple[int, int, int]:
     """Return (num_chapters, target_total_words, words_per_chapter) for a given duration."""
-    wpm = _AUDIENCE_WPM.get(audience, _DEFAULT_WPM)
+    spec  = get_audience(audience)
     speed = tts_speed if tts_speed is not None else _DEFAULT_SPEED
-    effective_wpm = wpm * speed          # keep float; int() only at final product
+    effective_wpm = spec.wpm * speed  # keep float; int() only at final product
 
-    max_ch = _AUDIENCE_MAX_CHAPTERS.get(audience, _DURATION_TO_CHAPTERS[-1][1])
-
-    num_chapters = min(max_ch, _DURATION_TO_CHAPTERS[-1][1])
+    num_chapters = spec.max_chapters
     for threshold, chapters in _DURATION_TO_CHAPTERS:
         if duration_min <= threshold:
-            num_chapters = min(max_ch, chapters)
+            num_chapters = min(spec.max_chapters, chapters)
             break
 
     target_total_words = int(duration_min * effective_wpm * _TTS_HEADROOM)
-    words_per_chapter = target_total_words // num_chapters
-    words_per_chapter = _cap_words_per_chapter(audience=audience, words=words_per_chapter)
+    words_per_chapter  = target_total_words // num_chapters
+    if spec.max_words_per_chapter is not None:
+        words_per_chapter = min(words_per_chapter, spec.max_words_per_chapter)
     target_total_words = words_per_chapter * num_chapters  # re-sync after cap
     return num_chapters, target_total_words, words_per_chapter
 
@@ -243,7 +218,9 @@ def write_chapter(state: dict) -> dict:
         for i, p in enumerate(plans)
     )
 
-    target = _cap_words_per_chapter(state["audience"], state["words_per_chapter"])
+    spec   = get_audience(state["audience"])
+    cap    = spec.max_words_per_chapter
+    target = min(state["words_per_chapter"], cap) if cap is not None else state["words_per_chapter"]
     chapter_prompt = select_chapter_prompt(state["audience"])
     chain = PromptTemplate.from_template(chapter_prompt) | generation_llm | parser
     draft = chain.invoke({
